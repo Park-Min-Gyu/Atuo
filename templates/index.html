@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>문서 정리 AI</title>
+<style>
+  :root { --ink:#1c2733; --muted:#5b6876; --line:#d5dde6; --accent:#1f4e78; --bg:#f4f6f9; --card:#fff; --warn:#8a5a00; --warn-bg:#fff6e0; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.6 "Malgun Gothic","Apple SD Gothic Neo",sans-serif; }
+  main { max-width:760px; margin:0 auto; padding:32px 16px 64px; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  .lead { color:var(--muted); margin:0 0 24px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:20px; margin-bottom:16px; }
+  label.title { display:block; font-weight:700; margin-bottom:6px; }
+  .hint { color:var(--muted); font-size:14px; margin:0 0 8px; }
+  textarea { width:100%; min-height:200px; padding:12px; border:1px solid var(--line); border-radius:8px; font:inherit; resize:vertical; }
+  textarea:focus, input:focus-visible, button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .checks { display:flex; gap:20px; flex-wrap:wrap; }
+  .checks label { display:flex; align-items:center; gap:8px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:12px 24px; font:inherit; font-weight:700; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:wait; }
+  .link { background:none; color:var(--accent); padding:0; font-weight:400; text-decoration:underline; }
+  #status { margin-left:12px; color:var(--muted); }
+  #status.error { color:#a61b1b; }
+  .files a { display:inline-block; margin:4px 8px 4px 0; padding:10px 16px; border:1px solid var(--accent); border-radius:8px; color:var(--accent); text-decoration:none; font-weight:700; }
+  .files a:hover { background:var(--accent); color:#fff; }
+  .warn { background:var(--warn-bg); color:var(--warn); border-radius:8px; padding:12px 16px; margin-top:12px; }
+  .warn ul { margin:4px 0 0; padding-left:20px; }
+  [hidden] { display:none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>문서 정리 AI</h1>
+  <p class="lead">대충 적어도 됩니다. 알아서 정리해서 한글 문서와 엑셀로 만들어 드립니다.</p>
+  <p class="hint">{% if ai %}AI 정리 모드로 동작 중입니다.{% else %}기본 정리 모드(API 키 없이 동작)입니다. 날짜·사람·할 일·숫자를 찾아 표와 그래프로 만들지만, 문장을 다듬어 주지는 않습니다.{% endif %}</p>
+
+  <form id="form">
+    <div class="card">
+      <label class="title" for="notes">메모</label>
+      <p class="hint">날짜, 할 일, 사람 이름 등을 생각나는 대로 적어 주세요.
+        <button type="button" class="link" id="example">예시 넣기</button></p>
+      <textarea id="notes" name="notes" placeholder="예) 11/20 영업팀 회의. 김민수 과장 3분기 매출 보고, 서울 1.2억 부산 8천..."></textarea>
+    </div>
+
+    <div class="card">
+      <label class="title" for="file">정리할 엑셀 파일 (선택)</label>
+      <p class="hint">정리가 안 된 엑셀(.xlsx)이나 CSV를 올리면 표를 깔끔하게 다시 만들고 그래프도 넣습니다.</p>
+      <input type="file" id="file" name="file" accept=".xlsx,.xlsm,.csv,.tsv">
+    </div>
+
+    <div class="card">
+      <span class="title" style="font-weight:700;display:block;margin-bottom:6px">만들 파일</span>
+      <div class="checks">
+        <label><input type="checkbox" name="hwpx" checked> 한글 문서 (.hwpx)</label>
+        <label><input type="checkbox" name="xlsx" checked> 엑셀 (.xlsx) · 표와 그래프</label>
+      </div>
+    </div>
+
+    <button type="submit" id="submit">문서 만들기</button>
+    <span id="status" role="status"></span>
+  </form>
+
+  <div class="card" id="result" hidden style="margin-top:24px">
+    <h2 id="r-title" style="margin:0 0 4px;font-size:20px"></h2>
+    <p class="hint" id="r-type"></p>
+    <p id="r-summary"></p>
+    <div class="files" id="r-files"></div>
+    <div class="warn" id="r-notices" hidden></div>
+    <div class="warn" id="r-missing" hidden>
+      <strong>이 내용을 더 알려주시면 문서가 완성됩니다</strong>
+      <ul id="r-missing-list"></ul>
+    </div>
+  </div>
+</main>
+
+<script>
+const EXAMPLE = `11/20 영업팀 주간회의, 3층 회의실
+참석 김민수 과장, 이지은 대리, 박준호 사원
+
+3분기 매출 - 서울 1억2천, 부산 8천, 대구 4500, 광주 3천
+목표는 서울 1억, 부산 9천, 대구 5천, 광주 3천이었음
+부산이 목표 못 채움 -> 이지은 대리가 원인 분석해서 다음주 금요일까지 보고
+신규 거래처 3곳 계약 진행중. 박준호가 견적서 보내기로
+연말 프로모션 기획안은 김과장이 12월 첫주까지`;
+
+const $ = id => document.getElementById(id);
+$('example').onclick = () => { $('notes').value = EXAMPLE; $('notes').focus(); };
+
+$('form').onsubmit = async (e) => {
+  e.preventDefault();
+  const btn = $('submit'), status = $('status');
+  btn.disabled = true;
+  status.className = '';
+  status.textContent = '정리하는 중입니다…';
+  $('result').hidden = true;
+  try {
+    const res = await fetch('/generate', { method: 'POST', body: new FormData(e.target) });
+    let data;
+    try { data = await res.json(); } catch { throw new Error('서버 오류가 났습니다. 실행 창의 메시지를 확인해 주세요.'); }
+    if (!res.ok) throw new Error(data.error || '오류가 났습니다.');
+
+    $('r-title').textContent = data.title;
+    $('r-type').textContent = data.doc_type;
+    $('r-summary').textContent = data.summary;
+    const files = $('r-files');
+    files.replaceChildren(...data.files.map(f => {
+      const a = document.createElement('a');
+      a.href = f.url; a.download = f.name; a.textContent = '⬇ ' + f.label;
+      return a;
+    }));
+    $('r-notices').hidden = !data.notices.length;
+    $('r-notices').textContent = data.notices.join(' ');
+    $('r-summary').hidden = !data.summary;
+    $('r-missing').hidden = !data.missing_info.length;
+    $('r-missing-list').replaceChildren(...data.missing_info.map(t => {
+      const li = document.createElement('li'); li.textContent = t; return li;
+    }));
+    $('result').hidden = false;
+    status.textContent = '완료';
+    $('result').scrollIntoView({ behavior: 'smooth' });
+  } catch (err) {
+    status.className = 'error';
+    status.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
+</script>
+</body>
+</html>
