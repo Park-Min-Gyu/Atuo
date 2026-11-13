@@ -1,0 +1,218 @@
+{
+  "model": "BUSH_VOID",
+  "elem_size": 4.0,
+  "tag": "BUSH_VOID_Ep4p0",
+  "source_inp": "/home/user/workspace/yl_auto/test/out_ccx/BUSH_VOID_Ep4p0/mesh/BUSH_VOID_hm.inp",
+  "dialect": "ccx",
+  "rp_id": 15532,
+  "element_type": "C3D10",
+  "axis": {
+    "axis_score_min_dist_mm": {
+      "X": 9.999999999999938,
+      "Y": 0.21952968328828396,
+      "Z": 1.8554811889876e-17
+    },
+    "source_axis": "X",
+    "rotation": [
+      [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      [
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "sets": {
+    "n_boundary_faces": 3942,
+    "inner_nodes": 800,
+    "outer_nodes": 2192,
+    "inner_area_mm2": 2500.9745234682728,
+    "outer_area_mm2": 7032.743939677017,
+    "inner_r_range": [
+      9.999999999999938,
+      10.000000000000064
+    ],
+    "outer_r_range": [
+      27.999999999999314,
+      28.000000000000668
+    ],
+    "inner_y_range": [
+      -20.0,
+      20.0
+    ],
+    "outer_y_range": [
+      -20.0,
+      20.0
+    ],
+    "bore_center_xz": [
+      1.6830168307371864e-15,
+      -8.506091321577883e-15
+    ],
+    "bore_center_offset_mm": 8.670993900561066e-15,
+    "warnings": []
+  },
+  "quality": {
+    "n_elem": 8672,
+    "vol_min": 0.11198833271071962,
+    "shape_q_min": 0.006727528705231059,
+    "shape_q_p01": 0.2582793837933504,
+    "n_q_below_0p1": 1,
+    "edge_len_mean": 4.457745070572916,
+    "midside_dev_max": 0.05411700839923497
+  },
+  "features": {
+    "volume_mm3": 73317.62221117389,
+    "length_y_mm": 40.0,
+    "r_min_mm": 9.999999999999938,
+    "r_max_mm": 28.000000000000668,
+    "inner_r_mean_mm": 10.0,
+    "outer_r_mean_mm": 27.999999999999993,
+    "inner_length_mm": 40.0,
+    "outer_length_mm": 40.0,
+    "inner_area_mm2": 2500.9745234682728,
+    "outer_area_mm2": 7032.743939677017,
+    "bbox_x_mm": 56.0,
+    "bbox_z_mm": 56.0
+  },
+  "mesh_log": [
+    "read BUSH_VOID_hm.inp: nodes=15531 (unused 0 dropped), elems=8672 (tet10), elsets={'Volume1': 8672}",
+    "tet10 midside order: Abaqus 규칙 일치",
+    "axis X -> +Y 회전, center=none"
+  ],
+  "material": {
+    "name": "TEST_RUBBER",
+    "mu": [
+      0.47842823307533466,
+      -0.07724058391519416,
+      0.02394379488170326
+    ],
+    "alpha": [
+      1.2365093409173833,
+      -1.407078300943144,
+      3.8504761402805032
+    ],
+    "D": [
+      0.09472001410433314,
+      0.0,
+      0.0
+    ],
+    "mu0": 0.4251314440418438,
+    "K0": 21.11486172074489
+  },
+  "jobs": [
+    {
+      "job": "BUSH_VOID_Ep4p0_SW0p0_XP",
+      "sw": 0.0,
+      "dir": "X",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_VOID_Ep4p0_SW0p0_YP",
+      "sw": 0.0,
+      "dir": "Y",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_VOID_Ep4p0_SW0p0_ZP",
+      "sw": 0.0,
+      "dir": "Z",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_VOID_Ep4p0_SWp1p0_XP",
+      "sw": 1.0,
+      "dir": "X",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_VOID_Ep4p0_SWp1p0_YP",
+      "sw": 1.0,
+      "dir": "Y",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_VOID_Ep4p0_SWp1p0_ZP",
+      "sw": 1.0,
+      "dir": "Z",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_VOID_Ep4p0_SWp2p0_XP",
+      "sw": 2.0,
+      "dir": "X",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_VOID_Ep4p0_SWp2p0_YP",
+      "sw": 2.0,
+      "dir": "Y",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_VOID_Ep4p0_SWp2p0_ZP",
+      "sw": 2.0,
+      "dir": "Z",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_VOID_Ep4p0_SWm1p0_XP",
+      "sw": -1.0,
+      "dir": "X",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_VOID_Ep4p0_SWm1p0_YP",
+      "sw": -1.0,
+      "dir": "Y",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_VOID_Ep4p0_SWm1p0_ZP",
+      "sw": -1.0,
+      "dir": "Z",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_VOID_Ep4p0_SWm2p0_XP",
+      "sw": -2.0,
+      "dir": "X",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_VOID_Ep4p0_SWm2p0_YP",
+      "sw": -2.0,
+      "dir": "Y",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_VOID_Ep4p0_SWm2p0_ZP",
+      "sw": -2.0,
+      "dir": "Z",
+      "sign": 1,
+      "amp": 2.0
+    }
+  ]
+}

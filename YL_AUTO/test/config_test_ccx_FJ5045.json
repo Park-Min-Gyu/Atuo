@@ -1,0 +1,98 @@
+{
+ "work_dir": "out_ccx_FJ5045",
+ "solver": "ccx",
+ "ccx": {
+  "cmd": "ccx",
+  "cpus": 1,
+  "max_parallel": 2,
+  "timeout_min": 30
+ },
+ "mesh": {
+  "elem_sizes": [
+   4.0
+  ],
+  "elem_type": "C3D10H",
+  "upgrade_tet4": true
+ },
+ "geometry": {
+  "axis": "auto",
+  "center": "none",
+  "inner_tol_mm": 0.5,
+  "outer_tol_mm": 0.5,
+  "normal_cos_min": 0.6
+ },
+ "materials": {
+  "FJ5045": {
+   "ogden3": {
+    "mu": [
+     0.75744,
+     0.0013173,
+     0.00049209
+    ],
+    "alpha": [
+     1.3475,
+     11.347,
+     -5.3698
+    ]
+   },
+   "D": [
+    0.0079104,
+    0.0,
+    0.0
+   ]
+  }
+ },
+ "default_material": "FJ5045",
+ "models": [
+  {
+   "name": "BUSH_PLAIN",
+   "file": "models/BUSH_PLAIN_axisZ.inp"
+  },
+  {
+   "name": "BUSH_VOID",
+   "file": "models/BUSH_VOID_axisX.inp"
+  }
+ ],
+ "swaging_mm": [
+  0,
+  1,
+  2,
+  -1,
+  -2
+ ],
+ "swaging_outward_positive": true,
+ "load": {
+  "directions": [
+   "X",
+   "Y",
+   "Z"
+  ],
+  "amplitude_mm": {
+   "X": 2.0,
+   "Y": 2.0,
+   "Z": 2.0
+  },
+  "signs": [
+   1
+  ]
+ },
+ "steps": {
+  "swage_inc": [
+   0.1,
+   1.0,
+   1e-06,
+   0.25
+  ],
+  "load_inc": [
+   0.05,
+   1.0,
+   1e-06,
+   0.1
+  ],
+  "max_inc": 2000,
+  "field_freq": 5
+ },
+ "qc": {
+  "symmetry_tol": 0.1
+ }
+}

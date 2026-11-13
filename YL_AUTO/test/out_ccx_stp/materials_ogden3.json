@@ -1,0 +1,31 @@
+{
+  "FJ5045": {
+    "name": "FJ5045",
+    "mu": [
+      0.75744,
+      0.0013173,
+      0.00049209
+    ],
+    "alpha": [
+      1.3475,
+      11.347,
+      -5.3698
+    ],
+    "fit_report": {
+      "source": "given coefficients",
+      "stability": {
+        "uniaxial": "stable 0.1~10.0",
+        "biaxial": "stable 0.1~10.0",
+        "planar": "stable 0.1~10.0",
+        "mu_alpha_positive": false
+      }
+    },
+    "D": [
+      0.0079104,
+      0.0,
+      0.0
+    ],
+    "mu0": 0.75924939,
+    "K0": 252.831715210356
+  }
+}

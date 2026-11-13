@@ -1,0 +1,218 @@
+{
+  "model": "BUSH_PLAIN",
+  "elem_size": 4.0,
+  "tag": "BUSH_PLAIN_Ep4p0",
+  "source_inp": "/home/user/workspace/yl_auto/test/out_ccx/BUSH_PLAIN_Ep4p0/mesh/BUSH_PLAIN_hm.inp",
+  "dialect": "ccx",
+  "rp_id": 9039,
+  "element_type": "C3D10",
+  "axis": {
+    "axis_score_min_dist_mm": {
+      "X": 2.4492935982947e-15,
+      "Y": 0.28086347299763686,
+      "Z": 9.999999999999938
+    },
+    "source_axis": "Z",
+    "rotation": [
+      [
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ],
+      [
+        0.0,
+        -1.0,
+        0.0
+      ]
+    ]
+  },
+  "sets": {
+    "n_boundary_faces": 1910,
+    "inner_nodes": 800,
+    "outer_nodes": 2020,
+    "inner_area_mm2": 2500.9745234682723,
+    "outer_area_mm2": 6278.392098491907,
+    "inner_r_range": [
+      9.999999999999938,
+      10.000000000000064
+    ],
+    "outer_r_range": [
+      24.999999999999346,
+      25.000000000000675
+    ],
+    "inner_y_range": [
+      -20.0,
+      20.0
+    ],
+    "outer_y_range": [
+      -20.0,
+      20.0
+    ],
+    "bore_center_xz": [
+      1.698891036955265e-15,
+      5.990332816750833e-15
+    ],
+    "bore_center_offset_mm": 6.226581567030895e-15,
+    "warnings": []
+  },
+  "quality": {
+    "n_elem": 5335,
+    "vol_min": 3.3624455181017296,
+    "shape_q_min": 0.24769582426392234,
+    "shape_q_p01": 0.3206384128808628,
+    "n_q_below_0p1": 0,
+    "edge_len_mean": 5.077108606881673,
+    "midside_dev_max": 0.05411700839923834
+  },
+  "features": {
+    "volume_mm3": 65979.5275469072,
+    "length_y_mm": 40.0,
+    "r_min_mm": 9.999999999999938,
+    "r_max_mm": 25.000000000000675,
+    "inner_r_mean_mm": 10.0,
+    "outer_r_mean_mm": 25.000000000000014,
+    "inner_length_mm": 40.0,
+    "outer_length_mm": 40.0,
+    "inner_area_mm2": 2500.9745234682723,
+    "outer_area_mm2": 6278.392098491907,
+    "bbox_x_mm": 50.0,
+    "bbox_z_mm": 50.0
+  },
+  "mesh_log": [
+    "read BUSH_PLAIN_hm.inp: nodes=9038 (unused 0 dropped), elems=5335 (tet10), elsets={'Volume1': 5335}",
+    "tet10 midside order: Abaqus 규칙 일치",
+    "axis Z -> +Y 회전, center=none"
+  ],
+  "material": {
+    "name": "TEST_RUBBER",
+    "mu": [
+      0.47842823307533466,
+      -0.07724058391519416,
+      0.02394379488170326
+    ],
+    "alpha": [
+      1.2365093409173833,
+      -1.407078300943144,
+      3.8504761402805032
+    ],
+    "D": [
+      0.09472001410433314,
+      0.0,
+      0.0
+    ],
+    "mu0": 0.4251314440418438,
+    "K0": 21.11486172074489
+  },
+  "jobs": [
+    {
+      "job": "BUSH_PLAIN_Ep4p0_SW0p0_XP",
+      "sw": 0.0,
+      "dir": "X",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_PLAIN_Ep4p0_SW0p0_YP",
+      "sw": 0.0,
+      "dir": "Y",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_PLAIN_Ep4p0_SW0p0_ZP",
+      "sw": 0.0,
+      "dir": "Z",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_PLAIN_Ep4p0_SWp1p0_XP",
+      "sw": 1.0,
+      "dir": "X",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_PLAIN_Ep4p0_SWp1p0_YP",
+      "sw": 1.0,
+      "dir": "Y",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_PLAIN_Ep4p0_SWp1p0_ZP",
+      "sw": 1.0,
+      "dir": "Z",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_PLAIN_Ep4p0_SWp2p0_XP",
+      "sw": 2.0,
+      "dir": "X",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_PLAIN_Ep4p0_SWp2p0_YP",
+      "sw": 2.0,
+      "dir": "Y",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_PLAIN_Ep4p0_SWp2p0_ZP",
+      "sw": 2.0,
+      "dir": "Z",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_PLAIN_Ep4p0_SWm1p0_XP",
+      "sw": -1.0,
+      "dir": "X",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_PLAIN_Ep4p0_SWm1p0_YP",
+      "sw": -1.0,
+      "dir": "Y",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_PLAIN_Ep4p0_SWm1p0_ZP",
+      "sw": -1.0,
+      "dir": "Z",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_PLAIN_Ep4p0_SWm2p0_XP",
+      "sw": -2.0,
+      "dir": "X",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_PLAIN_Ep4p0_SWm2p0_YP",
+      "sw": -2.0,
+      "dir": "Y",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "BUSH_PLAIN_Ep4p0_SWm2p0_ZP",
+      "sw": -2.0,
+      "dir": "Z",
+      "sign": 1,
+      "amp": 2.0
+    }
+  ]
+}

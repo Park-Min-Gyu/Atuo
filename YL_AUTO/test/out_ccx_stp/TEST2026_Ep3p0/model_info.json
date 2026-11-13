@@ -1,0 +1,136 @@
+{
+  "model": "TEST2026",
+  "elem_size": 3.0,
+  "tag": "TEST2026_Ep3p0",
+  "source_inp": "/home/user/workspace/yl_auto/test/out_ccx_stp/TEST2026_Ep3p0/mesh/TEST2026_hm.inp",
+  "dialect": "ccx",
+  "rp_id": 305664,
+  "element_type": "C3D10",
+  "axis": {
+    "axis_score_min_dist_mm": {
+      "X": 12.15371369385,
+      "Y": 0.13798539548995786,
+      "Z": 3.7669081276131534e-14
+    },
+    "source_axis": "X",
+    "rotation": [
+      [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      [
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "sets": {
+    "n_boundary_faces": 90706,
+    "inner_mode": "connected",
+    "inner_nodes": 3484,
+    "outer_nodes": 4559,
+    "inner_area_mm2": 5414.25871707881,
+    "outer_area_mm2": 5622.746247834579,
+    "inner_r_range": [
+      12.5,
+      19.693326259781863
+    ],
+    "outer_r_range": [
+      27.915997632840703,
+      29.250002345061194
+    ],
+    "inner_y_range": [
+      -26.0,
+      26.0
+    ],
+    "outer_y_range": [
+      -19.0,
+      19.0
+    ],
+    "bore_center_xz": [
+      7.818660567615915e-06,
+      0.005611486190001581
+    ],
+    "bore_center_offset_mm": 0.0056114916369920335,
+    "warnings": []
+  },
+  "quality": {
+    "n_elem": 155808,
+    "vol_min": 7.546234202815404e-10,
+    "shape_q_min": 0.0002494224223883084,
+    "shape_q_p01": 0.052785939007893044,
+    "n_q_below_0p1": 5253,
+    "edge_len_mean": 0.49134218738299834,
+    "midside_dev_max": 0.0
+  },
+  "features": {
+    "volume_mm3": 41636.72368657978,
+    "length_y_mm": 52.0,
+    "r_min_mm": 12.5,
+    "r_max_mm": 29.250002345061194,
+    "inner_r_mean_mm": 16.3180238026716,
+    "outer_r_mean_mm": 29.21856284556557,
+    "inner_length_mm": 52.0,
+    "outer_length_mm": 38.0,
+    "inner_area_mm2": 5414.25871707881,
+    "outer_area_mm2": 5622.746247834579,
+    "bbox_x_mm": 58.5,
+    "bbox_z_mm": 56.3074273877
+  },
+  "mesh_log": [
+    "read TEST2026_hm.inp: nodes=52249 (unused 0 dropped), elems=155808 (tet4), elsets={'Volume1': 155808}",
+    "tet4 -> tet10 변환 (중간절점 253414개 추가, 곡면 투영 없음)",
+    "tet10 midside order: Abaqus 규칙 일치",
+    "axis X -> +Y 회전, center=none"
+  ],
+  "material": {
+    "name": "FJ5045",
+    "mu": [
+      0.75744,
+      0.0013173,
+      0.00049209
+    ],
+    "alpha": [
+      1.3475,
+      11.347,
+      -5.3698
+    ],
+    "D": [
+      0.0079104,
+      0.0,
+      0.0
+    ],
+    "mu0": 0.75924939,
+    "K0": 252.831715210356
+  },
+  "jobs": [
+    {
+      "job": "TEST2026_Ep3p0_SW0p0_XP",
+      "sw": 0.0,
+      "dir": "X",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "TEST2026_Ep3p0_SW0p0_YP",
+      "sw": 0.0,
+      "dir": "Y",
+      "sign": 1,
+      "amp": 2.0
+    },
+    {
+      "job": "TEST2026_Ep3p0_SW0p0_ZP",
+      "sw": 0.0,
+      "dir": "Z",
+      "sign": 1,
+      "amp": 2.0
+    }
+  ]
+}

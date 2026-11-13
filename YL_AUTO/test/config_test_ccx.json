@@ -1,0 +1,25 @@
+{
+  "work_dir": "out_ccx",
+  "solver": "ccx",
+  "ccx": {"cmd": "ccx", "cpus": 1, "max_parallel": 2, "timeout_min": 30},
+  "mesh": {"elem_sizes": [4.0], "elem_type": "C3D10H", "upgrade_tet4": true},
+  "geometry": {"axis": "auto", "center": "none", "inner_tol_mm": 0.5, "outer_tol_mm": 0.5, "normal_cos_min": 0.6},
+  "materials": {
+    "TEST_RUBBER": {
+      "test_data": {"uniaxial": "models/TEST_RUBBER_uniaxial.csv",
+                    "biaxial": "models/TEST_RUBBER_biaxial.csv",
+                    "planar": "models/TEST_RUBBER_planar.csv"},
+      "poisson": 0.49
+    }
+  },
+  "default_material": "TEST_RUBBER",
+  "models": [
+    {"name": "BUSH_PLAIN", "file": "models/BUSH_PLAIN_axisZ.inp"},
+    {"name": "BUSH_VOID",  "file": "models/BUSH_VOID_axisX.inp"}
+  ],
+  "swaging_mm": [0, 1, 2, -1, -2],
+  "swaging_outward_positive": true,
+  "load": {"directions": ["X", "Y", "Z"], "amplitude_mm": {"X": 2.0, "Y": 2.0, "Z": 2.0}, "signs": [1]},
+  "steps": {"swage_inc": [0.1, 1.0, 1e-6, 0.25], "load_inc": [0.05, 1.0, 1e-6, 0.1], "max_inc": 2000, "field_freq": 5},
+  "qc": {"symmetry_tol": 0.10}
+}
