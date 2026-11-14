@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Atuo 수면패턴</string>
+    <string name="notification_listener_label">Atuo 알림 시각 감지</string>
+</resources>
