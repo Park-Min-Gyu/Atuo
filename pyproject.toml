@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atuo"
+version = "0.1.0"
+description = "Page-by-page document summarizer with a second verification pass on every page"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = ["pypdf>=4", "python-docx>=1.1"]
+
+[project.optional-dependencies]
+claude = ["anthropic>=1.0"]
+openai = ["openai>=1.40"]
+all = ["anthropic>=1.0", "openai>=1.40"]
+dev = ["pytest"]
+
+[project.scripts]
+atuo = "atuo.cli:main"
+
+[tool.setuptools]
+packages = ["atuo"]
