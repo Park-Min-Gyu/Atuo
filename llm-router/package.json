@@ -1,0 +1,25 @@
+{
+  "name": "atuo-llm-router",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal token-saving LLM router for Gemini + Claude behind one OpenAI-compatible endpoint",
+  "type": "module",
+  "engines": {
+    "node": ">=20.12"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "ask": "tsx scripts/ask.ts",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
