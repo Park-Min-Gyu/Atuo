@@ -34,10 +34,11 @@ async function checkGeminiModels(): Promise<void> {
       headers: { authorization: `Bearer ${cfg.gemini.apiKey}` },
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) {
-      console.warn(`[atuo] Gemini 키 확인 실패 (HTTP ${res.status}). GEMINI_API_KEY 를 확인하세요.`);
+    if ([400, 401, 403].includes(res.status)) {
+      console.warn(`[atuo] Gemini 가 키를 거부했습니다 (HTTP ${res.status}). GEMINI_API_KEY 를 확인하세요.`);
       return;
     }
+    if (!res.ok) return; // model listing unavailable; real requests report their own errors
     const body = (await res.json()) as { data?: Array<{ id: string }> };
     const ids = new Set((body.data ?? []).map((m) => m.id.replace(/^models\//, '')));
     for (const model of new Set([cfg.gemini.cheapModel, cfg.gemini.midModel])) {
