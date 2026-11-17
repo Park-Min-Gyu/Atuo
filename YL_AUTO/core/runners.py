@@ -95,7 +95,7 @@ def run_gmsh(g_cfg: dict, geom: Path, out_dir: Path, base: str, elem_size: float
         tmp_inp.unlink()
     script = Path(__file__).resolve().parent / "gmsh_mesher.py"
     cmd = [sys.executable, str(script), str(geom), str(tmp_inp), str(elem_size),
-           str(float(g_cfg.get("size_min_ratio", 0.15)))]
+           str(1.0 if g_cfg.get("fixed_size") else float(g_cfg.get("size_min_ratio", 0.15)))]
     log_file = out_dir / "gmsh_console.log"
     rc, dt = _run(cmd, out_dir, log_file, float(g_cfg.get("timeout_min", 30)) * 60)
     res = {}
@@ -108,6 +108,7 @@ def run_gmsh(g_cfg: dict, geom: Path, out_dir: Path, base: str, elem_size: float
     n_tet = int(res.get("n_tet", 0) or 0)
     ok = bool(res.get("ok")) and tmp_inp.exists() and n_tet >= int(g_cfg.get("min_elems", 50))
     st = {"STATUS": "OK" if ok else "FAIL", "ALGO": "GMSH_FALLBACK", "ELEM_SIZE": elem_size, "N_TET": n_tet,
+          "FIXED_SIZE": 1 if g_cfg.get("fixed_size") else 0,
           "N_TRIA": 0, "BAD_TRIA": 0, "INP_FILE": _p(out_inp) if ok else "", "returncode": rc,
           "elapsed_s": round(dt, 1),
           "MESSAGE": (res.get("healed") or "") if ok else
@@ -166,6 +167,7 @@ def _run_hypermesh_once(hm_cfg, tcl_script, geom, out_dir, base, elem_size, elem
         f"set ::YL(SMALL_W_RATIO) {float(hm_cfg.get('small_w_ratio', 0.25))}\n"
         f"set ::YL(SMALL_MAXLEN_RATIO) {float(hm_cfg.get('small_maxlen_ratio', 5.0))}\n"
         f"set ::YL(TET_MIN_RATIO) {float(hm_cfg.get('tet_min_ratio', 0.25))}\n"
+        f"set ::YL(FIXED_SIZE) {1 if hm_cfg.get('fixed_size') else 0}\n"
         f'if {{[catch {{source "{_p(tcl_script)}"}} yl_top_err]}} {{\n'
         '    catch { yl_log "UNCAUGHT Tcl error: $yl_top_err" ; yl_log "errorInfo: $::errorInfo" }\n'
         f'    catch {{ set fh [open "{_p(status_file)}" w]; puts $fh "STATUS=FAIL"; '

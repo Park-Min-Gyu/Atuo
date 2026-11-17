@@ -116,6 +116,13 @@ set RAIL_MIN_LEN      [expr {$ELEM_SIZE * 1.5}]
 # --- [3D Tetra Parameters] ---
 set DELETE_2D_SKIN    1
 set TET_GROWTH        1.2
+# [v15] 2 mm 완전 고정 모드 (::YL(FIXED_SIZE)=1, config 의 mesh.fixed_size)
+#   - Tetra 내부 성장률 1.0 (안쪽 Tetra 도 표면과 같은 크기)
+#   - 단순 메시 재시도에서 요소크기를 줄이는 시도(x0.7) 안 함
+#   - solid 직접 메시의 최소 크기도 요소크기와 같게
+#   (YL_V4 알고리즘 자체의 Case B 곡률 적응 크기는 원본 그대로 둠)
+set FIXED_SIZE        [yl_param FIXED_SIZE 0]
+if {$FIXED_SIZE} { set TET_GROWTH 1.0 }
 set MIN_TET_COLLAPSE  0.15
 # [v8] Tetra 개수 합격 기준 : n_tet >= max(TET_MIN_ABS, TET_MIN_RATIO * 표면 Tria 수)
 #      (예전에는 n_tet > 0 이면 OK 였기 때문에 3개짜리 메시가 OK 로 통과했었음)
@@ -135,7 +142,7 @@ set OUT_DIR           [yl_param OUT_DIR "C:/work/mesh"]
 set BASE_NAME         [yl_param BASE_NAME "YL_V5"]
 
 file mkdir $OUT_DIR
-yl_log "YL_V5 start : batch=$YL_BATCH size=$ELEM_SIZE type=$ABAQUS_ELEM_TYPE out=$OUT_DIR"
+yl_log "YL_V5 start : batch=$YL_BATCH size=$ELEM_SIZE type=$ABAQUS_ELEM_TYPE out=$OUT_DIR fixed_size=$FIXED_SIZE tet_growth=$TET_GROWTH"
 
 # ---------------- Vector & Geometry Helper Functions ----------------
 proc vsub {a b} {
@@ -703,14 +710,15 @@ proc yl_close_shell {size} {
 # Tetra 생성 : 여러 방법을 차례로 시도하고, 합격 개수(n_min) 이상 나온 첫 결과를 사용
 # 반환 : [list n_tet 방법이름]
 proc yl_tetmesh_robust {n_min} {
-    global TET_GROWTH ELEM_SIZE MIN_CURVE_SIZE
+    global TET_GROWTH ELEM_SIZE MIN_CURVE_SIZE FIXED_SIZE
+    set sz_min [expr {$FIXED_SIZE ? $ELEM_SIZE : $MIN_CURVE_SIZE}]
     if {[catch { yl_shell_check 1 "tetmesh 입력 표면" } err]} { yl_log "shell check 오류(무시): $err" }
     set tetstr "tet: 35 $TET_GROWTH 2 0 0.8 0 0"
     set attempts [list \
         [list shell_fixed       elems  1 [list $tetstr "pars: post_cln"]] \
         [list shell_float       elems  0 [list $tetstr "pars: upd_shell post_cln"]] \
         [list shell_fixed_plain elems  1 [list $tetstr]] \
-        [list solid_geometry    solids 0 [list $tetstr "2d: 1 0 1 $ELEM_SIZE $MIN_CURVE_SIZE 30 1" "pars: post_cln"]] ]
+        [list solid_geometry    solids 0 [list $tetstr "2d: 1 0 1 $ELEM_SIZE $sz_min 30 1" "pars: post_cln"]] ]
     set best_n 0
     set best_name "none"
     foreach att $attempts {
@@ -1431,6 +1439,10 @@ if {$YL_BATCH && $DO_TETRA && $n_tet < $::YL_TET_MIN && [yl_param FALLBACK 1]} {
     #   3) defeature x2 + 표면 요소크기 0.7배
     set fb_recipes [list [list "size x1.0" 1.0 0] [list "defeature x2" 1.0 1] [list "defeature x2 + size x0.7" 0.7 0]]
     if {!$DEFEATURE} { set fb_recipes [list [list "size x1.0" 1.0 0] [list "size x0.7" 0.7 0]] }
+    if {$FIXED_SIZE} {
+        set fb_recipes [list [list "size x1.0" 1.0 0]]
+        if {$DEFEATURE} { lappend fb_recipes [list "defeature x2" 1.0 1] }
+    }
     set fb_rc [catch {
       foreach fb_rcp $fb_recipes {
         lassign $fb_rcp fb_name fb_scale fb_defeat
@@ -1544,7 +1556,7 @@ yl_write_status [list STATUS $status MESSAGE $st_msg ELEM_SIZE $ELEM_SIZE \
     CASE_A [llength $caseA_wide_surfs] CASE_B [llength $caseB_curved_surfs] \
     F3_MERGED $total_f3_merged STRAIGHTENED $straightened_nodes \
     N_TRIA $n_2d_skin BAD_TRIA $bad_2d_cnt FREE_EDGES $free_edge_cnt \
-    N_TET $n_tet N_TET_MIN $::YL_TET_MIN DEFEATURED $n_defeat AREA_API $::YL_AREA_API AREA_FAIL $::YL_AREA_FAIL BAD_TET_COLLAPSE $bad_tet_collapse_cnt HM_FILE $out_hm INP_FILE $out_inp \
+    N_TET $n_tet N_TET_MIN $::YL_TET_MIN FIXED_SIZE $FIXED_SIZE TET_GROWTH $TET_GROWTH DEFEATURED $n_defeat AREA_API $::YL_AREA_API AREA_FAIL $::YL_AREA_FAIL BAD_TET_COLLAPSE $bad_tet_collapse_cnt HM_FILE $out_hm INP_FILE $out_inp \
     ALGO $YL_ALGO V4_ERROR $YL_ERR]
 
 if {$YL_BATCH} {

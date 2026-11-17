@@ -137,23 +137,30 @@ def stage_mesh(cfg, m, es, tag_dir, force):
     if out_inp.exists() and not force:
         st = runners.read_kv(mesh_dir / "hm_status.txt")
         ok, why = runners.tet_count_ok(st, cfg["hypermesh"].get("tet_min_ratio", 0.25))
+        # [v15] 2 mm 고정 설정이 바뀌었으면 예전 메시를 쓰지 않고 다시 만든다
+        want_fixed = 1 if cfg["mesh"].get("fixed_size") else 0
+        if st.get("STATUS") == "OK" and ok and int(st.get("FIXED_SIZE", 0) or 0) != want_fixed:
+            ok = False
+            log(f"[{m['name']}] 메시 크기 설정(fixed_size={want_fixed})이 이전 메시와 달라 다시 메시합니다")
         want_gmsh = str(cfg["mesh"].get("mesher", "hypermesh")).lower() == "gmsh"
         if st.get("STATUS") == "OK" and ok and (not want_gmsh or st.get("ALGO") == "GMSH_FALLBACK"
                                                or not runners.gmsh_available()):
             return st
-        if st.get("STATUS") == "OK":
+        if st.get("STATUS") == "OK" and why:
             log(f"[{m['name']}] 이전 메시 재사용 안 함 ({why}) -> HyperMesh 다시 실행")
-    hm = cfg["hypermesh"]
+    hm = dict(cfg["hypermesh"])
+    hm["fixed_size"] = bool(cfg["mesh"].get("fixed_size"))
+    g_cfg = dict(cfg.get("gmsh_fallback", {}))
+    g_cfg["fixed_size"] = hm["fixed_size"]
     if str(cfg["mesh"].get("mesher", "hypermesh")).lower() == "gmsh":
         # [v14] gmsh 를 주 메셔로 (Netgen 최적화로 납작한 Tetra 가 적음). 실패하면 HyperMesh 로.
-        gs = runners.run_gmsh(cfg.get("gmsh_fallback", {}), src, mesh_dir, m["name"], es)
+        gs = runners.run_gmsh(g_cfg, src, mesh_dir, m["name"], es)
         if gs.get("STATUS") == "OK":
             return gs
         log(f"[{m['name']}] gmsh 메시 실패 ({gs.get('MESSAGE', '')}) -> HyperMesh 로 시도")
     st = runners.run_hypermesh(hm, resolve(cfg, hm.get("tcl", "hypermesh/YL_V5_batch.tcl")), src, mesh_dir,
                                m["name"], es, cfg["mesh"].get("elem_type", "C3D10H"))
     # [v9] HyperMesh 가 끝까지 실패하면 예비 메셔(gmsh)로 한 번 더 시도
-    g_cfg = cfg.get("gmsh_fallback", {})
     if st.get("STATUS") != "OK" and g_cfg.get("enabled", True) \
             and str(cfg["mesh"].get("mesher", "hypermesh")).lower() != "gmsh":
         log(f"[{m['name']}] HyperMesh 메시 실패 ({st.get('MESSAGE', '')}) -> 예비 메셔 gmsh 시도 ...")

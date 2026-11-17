@@ -51,7 +51,8 @@ def mesh(src: str, out: str, size: float, min_ratio: float = 0.15, threads: int 
                 raise RuntimeError("형상에 solid(부피)가 없고 면을 꿰매도(최대 0.2 mm) 닫히지 않습니다 "
                                    "-> CAD 에서 solid 로 다시 내보내야 합니다")
             gmsh.option.setNumber("Mesh.MeshSizeMax", size)
-            gmsh.option.setNumber("Mesh.MeshSizeMin", size * min_ratio * mfac)
+            # min_ratio >= 1 : 2 mm 완전 고정 (최소 = 최대 = 요소크기)
+            gmsh.option.setNumber("Mesh.MeshSizeMin", size if min_ratio >= 1.0 else size * min_ratio * mfac)
             gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
             gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 1)
             gmsh.option.setNumber("Mesh.ElementOrder", 1)

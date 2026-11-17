@@ -19,6 +19,8 @@
   ],
   "elem_type": "C3D10H",
   "upgrade_tet4": true,
+  "fixed_size": true,
+  "_comment_fixed_size": "true: 요소크기 완전 고정 (단순 메시 x0.7 재시도 안 함, Tetra 내부 성장률 1.0, gmsh 최소=최대). false: 예전처럼 크기를 줄여 가며 재시도",
   "repair_quality": true,
   "mesher": "hypermesh",
   "_comment_v14": "repair_quality: 납작한 Tetra 자동 보정. mesher: hypermesh | gmsh (gmsh 는 pip install gmsh 필요, 품질이 더 좋은 편)",
