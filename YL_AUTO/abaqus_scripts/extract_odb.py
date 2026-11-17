@@ -40,15 +40,20 @@ def rows_from_history(odb, rp_label):
     rows = []
     for sname in odb.steps.keys():
         st = odb.steps[sname]
-        reg = find_history_region(st, rp_label)
-        if reg is None:
-            return None
-        hos = reg.historyOutputs
-        for k in KEYS:
-            if k not in hos.keys():
-                return None
-        data = [hos[k].data for k in KEYS]
-        for i in range(len(data[0])):
+        # [v13] 발산으로 중단된 ODB 는 마지막 스텝에 history 가 없거나 비어 있다.
+        #       예전에는 그런 스텝이 하나라도 있으면 전체를 포기했다 -> 그 스텝만 건너뛴다.
+        try:
+            reg = find_history_region(st, rp_label)
+            if reg is None:
+                continue
+            hos = reg.historyOutputs
+            if [k for k in KEYS if k not in hos.keys()]:
+                continue
+            data = [hos[k].data for k in KEYS]
+            n = min([len(d) for d in data])
+        except Exception:
+            continue
+        for i in range(n):
             t = data[0][i][0]
             rows.append([sname, t, st.totalTime + t] + [d[i][1] for d in data])
     return rows
@@ -62,11 +67,14 @@ def rows_from_field(odb):
     for sname in odb.steps.keys():
         st = odb.steps[sname]
         for fr in st.frames:
-            fo = fr.fieldOutputs
-            if "U" not in fo.keys() or "RF" not in fo.keys():
+            try:
+                fo = fr.fieldOutputs
+                if "U" not in fo.keys() or "RF" not in fo.keys():
+                    continue
+                u = fo["U"].getSubset(region=nset).values[0].data
+                rf = fo["RF"].getSubset(region=nset).values[0].data
+            except Exception:
                 continue
-            u = fo["U"].getSubset(region=nset).values[0].data
-            rf = fo["RF"].getSubset(region=nset).values[0].data
             t = fr.frameValue
             rows.append([sname, t, st.totalTime + t, u[0], u[1], u[2], rf[0], rf[1], rf[2]])
     return rows
@@ -94,4 +102,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        import traceback
+        traceback.print_exc()          # -> <job>.extractlog 에 남아 파이프라인 로그에 표시됨
+        sys.exit(3)

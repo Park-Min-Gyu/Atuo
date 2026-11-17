@@ -25,7 +25,7 @@ def read_rp_csv(path: Path):
     return steps, np.array(rows)
 
 
-def split_combined_csv(csv_path: Path, plan: list, run_dir: Path) -> dict:
+def split_combined_csv(csv_path: Path, plan: list, run_dir: Path, keep_existing: bool = False) -> dict:
     """[v11] 통합 Job(ODB 1개)의 LOAD_RP CSV 를 예전처럼 '스웨징 스텝 + 하중 스텝' 2-스텝짜리
     <job>_RP.csv 로 나눈다 -> 이후 강성 계산/QC/데이터셋 코드는 그대로 사용.
     하중 직전 상태(= 직전 스텝의 마지막 점)를 기준점으로 쓴다.
@@ -42,8 +42,9 @@ def split_combined_csv(csv_path: Path, plan: list, run_dir: Path) -> dict:
         done = bool(load) and float(load[-1].split(",")[0]) > 0.9999
         out[c["job"]] = {"completed": done, "n_points": len(load)}
         f = Path(run_dir) / f"{c['job']}_RP.csv"
-        if not load or not ref:
-            if f.exists():
+        if not load or not ref or (keep_existing and not done):
+            # keep_existing : 이어서 계산한 Job 이 앞 Job 에서 이미 얻은 완료 곡선을 지우지 않게
+            if f.exists() and not keep_existing:
                 f.unlink()
             continue
         with open(f, "w") as fh:

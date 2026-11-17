@@ -234,33 +234,154 @@ def odb_mode(cfg, dialect) -> str:
     return "single" if (mode == "single" and dialect == "abaqus") else "separate"
 
 
+def _split_step_blocks(inp_text: str):
+    """통합 INP 를 (머리말, [(스텝이름, 스텝본문)]) 으로 나눈다."""
+    marks = [(m.start(), m.group(1)) for m in re.finditer(r"^\*\* -{16} (\S+) -{16}\n", inp_text, re.M)]
+    if not marks:
+        return inp_text, []
+    blocks = []
+    for k, (pos, name) in enumerate(marks):
+        end = marks[k + 1][0] if k + 1 < len(marks) else len(inp_text)
+        blocks.append((name, inp_text[pos:end]))
+    return inp_text[:marks[0][0]], blocks
+
+
+def _write_continuation(run_dir, base_inp: Path, new_job: str, cases: list) -> list:
+    """[v13] 남은 케이스만으로 통합 INP 를 다시 만든다 (원본 INP 의 스텝 블록을 재조합).
+    스웨징 값마다 SWAGE 스텝을 처음부터 다시 걸고 남은 하중 케이스를 이어 붙인다. 반환: 새 계획"""
+    head, blocks = _split_step_blocks(base_inp.read_text(encoding="ascii", errors="ignore"))
+    bd = dict(blocks)
+    out, plan, prev = [head], [], None
+    for sw in list(dict.fromkeys(c["sw"] for c in cases)):
+        group = [c for c in cases if c["sw"] == sw]
+        sw_step = group[0]["swage_step"]
+        out.append(bd[sw_step])
+        prev = sw_step
+        for c in group:
+            back = c["load_step"][:-5] + "_BACK"
+            out.append(bd[c["load_step"]])
+            plan.append(dict(c, prev_step=prev))
+            out.append(bd[back])
+            prev = back
+    txt = "".join(out)
+    if "LOAD_RP, 1, 6, 0." not in txt:      # 첫 스텝에 RP 구속이 있어야 함 (원본은 맨 처음 SWAGE 에만 있음)
+        txt = txt.replace("*Boundary\n", "*Boundary\nLOAD_RP, 1, 6, 0.\n", 1)
+    (run_dir / f"{new_job}.inp").write_text(txt, encoding="ascii")
+    return plan
+
+
+def _step_order(plan: list) -> list:
+    """계획 -> 스텝 이름 순서 (.sta 의 스텝 번호와 맞추기 위함)"""
+    names, last_sw = [], None
+    for c in plan:
+        if c["swage_step"] != last_sw:
+            names.append(c["swage_step"])
+            last_sw = c["swage_step"]
+        names += [c["load_step"], c["load_step"][:-5] + "_BACK"]
+    return names
+
+
 def stage_run_combined(cfg, run_dir, info, stages, force):
-    """[v11] 통합 Job 1개 실행 -> ODB 1개 -> CSV 1개 -> 예전 형식의 <job>_RP.csv 여러 개로 분리."""
-    cjob, plan = info["combined"]["job"], info["combined"]["plan"]
+    """[v11] 통합 Job 1개 실행 -> ODB 1개 -> CSV -> 예전 형식의 <job>_RP.csv 여러 개로 분리.
+    [v13] 어떤 스텝이 발산하면 그 케이스(스웨징 스텝이면 그 스웨징 값 전체)만 건너뛰고,
+          남은 케이스로 이어서 계산하는 Job(<job>_r2, _r3 ...)을 자동으로 만들어 돌린다."""
+    cjob, plan0 = info["combined"]["job"], info["combined"]["plan"]
+    tag = info["tag"]
     st_file = run_dir / f"{cjob}_status.json"
     st = json.loads(st_file.read_text()) if st_file.exists() else {}
-    if "run" in stages and (force or not st.get("completed")):
-        acfg = dict(cfg["abaqus"])
-        acfg["timeout_min"] = float(acfg.get("timeout_min", 120)) * max(1, len(plan))   # Job 1개가 전부를 계산
-        st = runners.run_abaqus(acfg, run_dir, cjob)
-        st_file.write_text(json.dumps(st, indent=2))
-    csv_path = run_dir / f"{cjob}_RP.csv"
-    # 중간에 발산해도 그 전 스텝까지는 ODB 에 남아 있으므로 ODB 만 있으면 추출한다
-    if "extract" in stages and (run_dir / f"{cjob}.odb").exists() and (force or not csv_path.exists()
-                                                                     or "run" in stages):
-        ok, _ = runners.extract_odb(cfg["abaqus"], run_dir, cjob, info["rp_id"],
-                                    HERE / "abaqus_scripts" / "extract_odb.py")
-        st["extracted"] = bool(ok)
-        st_file.write_text(json.dumps(st, indent=2))
-    parts = results.split_combined_csv(csv_path, plan, run_dir) if csv_path.exists() else {}
-    for c in plan:
-        pinfo = parts.get(c["job"], {"completed": False, "n_points": 0})
-        vst = {"completed": pinfo["completed"], "n_increments": pinfo["n_points"], "cutbacks": None,
-               "elapsed_s": st.get("elapsed_s"), "combined_job": cjob,
-               "errors": [] if pinfo["completed"] else (st.get("errors") or [f"{c['load_step']} 스텝 미완료"])}
-        (run_dir / f"{c['job']}_status.json").write_text(json.dumps(vst, indent=2))
-    st["n_cases_done"] = sum(1 for v in parts.values() if v["completed"])
-    st["n_cases"] = len(plan)
+    script = HERE / "abaqus_scripts" / "extract_odb.py"
+    max_jobs = int(cfg.get("abaqus", {}).get("max_continuations", len(plan0))) + 1
+    do_run = "run" in stages and (force or not st.get("all_done"))
+
+    def extract_and_split(job, plan):
+        csv_path = run_dir / f"{job}_RP.csv"
+        if "extract" in stages and (run_dir / f"{job}.odb").exists() and (force or do_run or not csv_path.exists()):
+            if csv_path.exists():
+                csv_path.unlink()
+            ok, _ = runners.extract_odb(cfg["abaqus"], run_dir, job, info["rp_id"], script)
+            if not ok:
+                log(f"  [{tag}] {job}: ODB 에서 LOAD_RP 추출 실패 -> {job}.extractlog 내용:")
+                for l in runners._tail(run_dir / f"{job}.extractlog", 8):
+                    log(f"    {l}")
+        return results.split_combined_csv(csv_path, plan, run_dir, keep_existing=True) if csv_path.exists() else {}
+
+    done, skipped = {}, {}
+    chain = st.get("chain") if not do_run else None
+    if chain:                                     # 실행 없이 추출/리포트만 다시
+        for link in chain:
+            for k, v in extract_and_split(link["job"], link["plan"]).items():
+                if v["completed"]:
+                    done[k] = link["job"]
+        skipped = st.get("skipped", {})
+    elif do_run:
+        for c in plan0:                           # 이전 실행의 케이스별 CSV 는 지우고 새로
+            f = run_dir / f"{c['job']}_RP.csv"
+            if f.exists():
+                f.unlink()
+        chain, job, plan = [], cjob, plan0
+        for k in range(1, max_jobs + 1):
+            acfg = dict(cfg["abaqus"])
+            acfg["timeout_min"] = float(acfg.get("timeout_min", 120)) * max(1, len(plan))
+            jst = runners.run_abaqus(acfg, run_dir, job)
+            if k == 1:
+                st = dict(jst)
+            chain.append({"job": job, "plan": plan, "completed": jst.get("completed"),
+                          "elapsed_s": jst.get("elapsed_s")})
+            parts = extract_and_split(job, plan)
+            prog = runners.sta_progress(run_dir, job)
+            names = _step_order(plan)
+            step_done = {names[i - 1] for i, v in prog.items() if i <= len(names) and v["step_time"] > 0.9999}
+            for c in plan:
+                if parts.get(c["job"], {}).get("completed"):
+                    done[c["job"]] = job
+            if jst.get("completed") or not prog:
+                if not jst.get("completed"):
+                    log(f"  [{tag}] {job}: Abaqus 가 시작하지 못함 -> 이어서 계산 안 함 {jst.get('errors') or ''}")
+                break
+            # 실패한 스텝 = 완료되지 않은 첫 스텝
+            failed = next((n for n in names if n not in step_done), None)
+            if failed is None:
+                break
+            fi = names.index(failed) + 1
+            ft = prog.get(fi, {}).get("step_time", 0.0)
+            err = "; ".join(jst.get("errors") or [])[:160]
+            if failed.endswith("_SWAGE"):
+                bad = [c for c in plan if c["swage_step"] == failed]
+                why = f"스웨징 스텝 {failed} 발산 (step time {ft:.3f})"
+            elif failed.endswith("_LOAD"):
+                bad = [c for c in plan if c["load_step"] == failed]
+                why = f"하중 스텝 {failed} 발산 (step time {ft:.3f})"
+            else:                                   # _BACK(원위치) 실패 : 그 케이스의 하중 곡선은 이미 얻음
+                bad = []
+                why = f"원위치 스텝 {failed} 발산 (step time {ft:.3f})"
+            for c in bad:
+                skipped[c["job"]] = f"{why} | {err}"
+            rest = [c for c in plan0 if c["job"] not in done and c["job"] not in skipped]
+            log(f"  [{tag}] {job}: {why}. 완료 {len(done)}/{len(plan0)}, 건너뜀 {len(skipped)}, 남은 {len(rest)} 케이스"
+                + (f" -> 이어서 계산 ({cjob}_r{k + 1})" if rest and k < max_jobs else ""))
+            if not rest or k >= max_jobs:
+                break
+            job = f"{cjob}_r{k + 1}"
+            plan = _write_continuation(run_dir, run_dir / f"{cjob}.inp", job, rest)
+        st["chain"] = chain
+        st["skipped"] = skipped
+        st["all_done"] = len(done) == len(plan0)
+        st["elapsed_s"] = round(sum(float(l.get("elapsed_s") or 0) for l in chain), 1)
+    else:
+        for k, v in extract_and_split(cjob, plan0).items():
+            if v["completed"]:
+                done[k] = cjob
+    for c in plan0:
+        ok = c["job"] in done
+        vst = {"completed": ok, "n_increments": None, "cutbacks": None, "elapsed_s": st.get("elapsed_s"),
+               "combined_job": done.get(c["job"], cjob),
+               "errors": [] if ok else [skipped.get(c["job"]) or "; ".join(st.get("errors") or [])
+                                        or f"{c['load_step']} 스텝 미완료"]}
+        (run_dir / f"{c['job']}_status.json").write_text(json.dumps(vst, indent=2, ensure_ascii=False))
+    st["n_cases_done"] = len(done)
+    st["n_cases"] = len(plan0)
+    st["extracted"] = bool(done)
+    st_file.write_text(json.dumps(st, indent=2, ensure_ascii=False))
     return cjob, st
 
 
@@ -501,7 +622,11 @@ def main():
                 log(f"  {job}: completed={st.get('completed')} inc={st.get('n_increments')} "
                     f"t={st.get('elapsed_s')}s extracted={st.get('extracted', '-')} {st.get('errors') or ''}")
                 if "n_cases" in st:
-                    log(f"    통합 Job(ODB 1개): 하중 케이스 {st['n_cases_done']}/{st['n_cases']} 개 완료")
+                    njob = len(st.get("chain") or [1])
+                    log(f"    통합 Job: 하중 케이스 {st['n_cases_done']}/{st['n_cases']} 개 완료"
+                        + (f" (발산한 케이스를 건너뛰며 Job {njob}개로 나눠 계산)" if njob > 1 else ""))
+                    for kjob, why in (st.get("skipped") or {}).items():
+                        log(f"    건너뜀 {kjob}: {why}")
                 if not st.get("completed") and "run" in stages:
                     n_fail_shown += 1
                     if n_fail_shown <= 3:   # 같은 원인이 반복되므로 처음 3개만 자세히

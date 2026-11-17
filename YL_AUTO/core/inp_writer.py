@@ -191,14 +191,16 @@ def write_combined_inp(path: Path, mesh_file: str, mesh, sets, mat: dict, cases:
 
     고무(Ogden 초탄성)는 이력에 의존하지 않으므로 하중을 0 으로 되돌린 뒤 다음 하중을 걸면
     Job 을 따로 돌린 것과 같은 곡선이 나온다. 메시/재료가 ODB 에 한 번만 저장되어 용량이 준다.
-    cases : jobs_for() 가 만든 목록 (job, sw, dir, sign, amp). 스웨징 오름차순으로 정렬해서 사용.
+    cases : jobs_for() 가 만든 목록 (job, sw, dir, sign, amp). 스웨징은 목록에 나온 순서대로.
     반환  : 스텝 계획 [{job, sw, dir, sign, amp, swage_step, load_step, prev_step}]"""
     sc = {"swage_inc": [0.1, 1.0, 1e-8, 0.25], "load_inc": [0.02, 1.0, 1e-8, 0.05], "max_inc": 2000,
           "field_freq": 5}
     if steps_cfg:
         sc.update(steps_cfg)
     back_inc = sc.get("back_inc", [0.25, 1.0, 1e-8, 1.0])
-    sws = sorted({c["sw"] for c in cases})
+    # [v13] 스웨징 순서 = config 의 swaging_mm 순서 (예: 0, 1, 2, -1, -2).
+    #       오름차순(-2 먼저)이면 가장 가혹한 케이스가 맨 앞이라 거기서 발산하면 아무 결과도 못 얻는다.
+    sws = list(dict.fromkeys(c["sw"] for c in cases))
     plan = []
     fh = open(path, "w", encoding="ascii")
     w = fh.write

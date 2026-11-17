@@ -110,7 +110,8 @@ def run_gmsh(g_cfg: dict, geom: Path, out_dir: Path, base: str, elem_size: float
     st = {"STATUS": "OK" if ok else "FAIL", "ALGO": "GMSH_FALLBACK", "ELEM_SIZE": elem_size, "N_TET": n_tet,
           "N_TRIA": 0, "BAD_TRIA": 0, "INP_FILE": _p(out_inp) if ok else "", "returncode": rc,
           "elapsed_s": round(dt, 1),
-          "MESSAGE": "" if ok else f"gmsh 실패 (rc={rc}): {res.get('error') or 'gmsh_console.log 확인'}"}
+          "MESSAGE": (res.get("healed") or "") if ok else
+          f"gmsh 실패 (rc={rc}): {res.get('error') or 'gmsh_console.log 확인'}"}
     if ok:
         if out_inp.exists():
             out_inp.unlink()
@@ -257,6 +258,24 @@ def _abaqus_launch_errors(run_dir: Path, job: str) -> list:
 def _abaqus_started(run_dir: Path, job: str) -> bool:
     """Abaqus 가 실제로 Job 을 시작했는지 (.dat/.sta/.msg/.odb/.com 중 하나라도 새로 생겼는지)"""
     return any((run_dir / f"{job}{ext}").exists() for ext in (".dat", ".sta", ".msg", ".odb", ".com"))
+
+
+def sta_progress(run_dir: Path, job: str) -> dict:
+    """[v13] <job>.sta 에서 스텝별 진행 상황을 읽는다 (ODB 추출이 안 돼도 어디까지 됐는지 알 수 있음).
+    반환 {스텝번호(1부터): {"inc": 마지막 증분, "step_time": 마지막 스텝 시간}}"""
+    out = {}
+    try:
+        txt = (run_dir / f"{job}.sta").read_text(errors="ignore")
+    except OSError:
+        return out
+    for l in txt.splitlines():
+        v = l.split()
+        if len(v) >= 9 and v[0].isdigit() and v[1].isdigit():
+            try:
+                out[int(v[0])] = {"inc": int(v[1]), "step_time": float(v[7])}
+            except ValueError:
+                pass
+    return out
 
 
 def run_abaqus(abq_cfg: dict, run_dir: Path, job: str) -> dict:

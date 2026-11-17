@@ -35,8 +35,21 @@ def mesh(src: str, out: str, size: float, min_ratio: float = 0.15, threads: int 
             gmsh.model.occ.importShapes(src)
             gmsh.model.occ.synchronize()
             vols = [t for _, t in gmsh.model.getEntities(3)]
+            healed = ""
             if not vols:
-                raise RuntimeError("형상에 solid(부피)가 없습니다 (면만 있는 STEP)")
+                # [v13] 면만 있는 STEP (HyperMesh 로그의 'solids after import : 0') :
+                #       면을 꿰매서(sew) solid 로 만든다. 허용오차를 키워 가며 시도.
+                for tol in (1e-3, 1e-2, 5e-2, 2e-1):
+                    gmsh.model.occ.healShapes([], tol, True, True, True, True, True)
+                    gmsh.model.occ.synchronize()
+                    vols = [t for _, t in gmsh.model.getEntities(3)]
+                    if vols:
+                        healed = f"면 꿰매기(sew) tol={tol} mm 로 solid {len(vols)}개 생성"
+                        print("gmsh:", healed, flush=True)
+                        break
+            if not vols:
+                raise RuntimeError("형상에 solid(부피)가 없고 면을 꿰매도(최대 0.2 mm) 닫히지 않습니다 "
+                                   "-> CAD 에서 solid 로 다시 내보내야 합니다")
             gmsh.option.setNumber("Mesh.MeshSizeMax", size)
             gmsh.option.setNumber("Mesh.MeshSizeMin", size * min_ratio * mfac)
             gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
@@ -56,7 +69,7 @@ def mesh(src: str, out: str, size: float, min_ratio: float = 0.15, threads: int 
             gmsh.option.setNumber("Mesh.SaveGroupsOfElements", 1)
             gmsh.write(out)
             return {"ok": True, "n_tet": n_tet, "n_node": n_node, "recipe": i, "n_vol": len(vols),
-                    "elapsed_s": round(time.time() - t0, 1), "error": ""}
+                    "elapsed_s": round(time.time() - t0, 1), "error": "", "healed": healed}
         except Exception as e:  # 다음 설정으로 재시도
             last_err = f"recipe {i} (2D={a2}, 3D={a3}): {e}"
             print("gmsh 시도 실패 ->", last_err, flush=True)

@@ -677,6 +677,29 @@ proc yl_shell_check {{do_fix 1} {label "shell"}} {
     return [list $n_tria $n_free $n_t $n_del]
 }
 
+# [v13] 표면 메시의 구멍(free edge) 닫기
+#   꿰매지지 않은 면 경계에서는 양쪽 절점이 조금 어긋나 있다. 절점 병합(equivalence) 허용오차를
+#   요소크기의 2.5% -> 5% -> 10% 로 키워 가며 free edge 가 0 이 될 때까지 시도한다.
+#   반환 : 남은 free edge 수
+proc yl_close_shell {size} {
+    set n_free -1
+    foreach frac {0.0 0.025 0.05 0.10} {
+        if {$frac > 0.0} {
+            *clearmark elems 1
+            *createmark elems 1 "by config" tria3 tria6
+            if {[llength [hm_getmark elems 1]] > 0} {
+                catch { yl_hm *equivalence elems 1 [expr {$size * $frac}] 1 0 0 }
+            }
+            *clearmark elems 1
+        }
+        set label [expr {$frac > 0.0 ? "절점 병합 tol=[format %.3f [expr {$size * $frac}]]mm 후" : "표면 닫힘 검사"}]
+        if {[catch { set r [yl_shell_check 1 $label] } err]} { yl_log "shell check 오류(무시): $err"; break }
+        set n_free [lindex $r 1]
+        if {$n_free == 0} { break }
+    }
+    return $n_free
+}
+
 # Tetra 생성 : 여러 방법을 차례로 시도하고, 합격 개수(n_min) 이상 나온 첫 결과를 사용
 # 반환 : [list n_tet 방법이름]
 proc yl_tetmesh_robust {n_min} {
@@ -857,6 +880,22 @@ if {$YL_BATCH} {
     catch { set n_sol [llength [hm_getmark solids 1]] }
     *clearmark solids 1
     yl_log "solids after import : $n_sol"
+    # [v13] solid 가 0개 = 면들이 서로 꿰매지지 않은 STEP (면 사이 모서리가 공유되지 않음).
+    #       그대로 메시하면 면 경계에서 절점이 어긋나 free edge(구멍)가 생기고 tetmesh 가 안 된다.
+    #       -> 면의 free edge 를 허용오차를 키워 가며 서로 꿰맨다(stitch).
+    if {$n_sol == 0} {
+        foreach st_tol {0.01 0.05 0.1} {
+            *clearmark surfs 1
+            *createmark surfs 1 "all"
+            if {[catch { yl_hm *selfstitchcombine 1 146 $st_tol $st_tol } err]} {
+                yl_log "surface stitch tol=$st_tol : 명령 실패 ($err)"
+                *clearmark surfs 1
+                break
+            }
+            *clearmark surfs 1
+            yl_log "surface stitch tol=$st_tol : 실행함"
+        }
+    }
 }
 
 set n_defeat 0
@@ -1426,12 +1465,14 @@ if {$YL_BATCH && $DO_TETRA && $n_tet < $::YL_TET_MIN && [yl_param FALLBACK 1]} {
         set shell_eids [hm_getmark elems 1]
         if {[llength $shell_eids] > 0} { catch { yl_hm *equivalence elems 1 0.01 1 0 0 } }
         *clearmark elems 1
+        set fb_free [yl_close_shell $fb_size]
         *clearmark elems 1
         *createmark elems 1 "by config" tria3 tria6
         set shell_eids [hm_getmark elems 1]
         *clearmark elems 1
         set n_2d_skin [llength $shell_eids]
         set free_edge_cnt [sc_count_free_edges $shell_eids]
+        if {$fb_free > 0} { set free_edge_cnt $fb_free }
         set bad_2d_cnt 0
         catch { set bad_2d_cnt [llength [sc_get_bad_aspect_elems $shell_eids $TARGET_ASPECT]] }
         yl_log "fallback <$fb_name>: tria=$n_2d_skin free_edges=$free_edge_cnt aspect>$TARGET_ASPECT=$bad_2d_cnt"
@@ -1491,7 +1532,7 @@ yl_log $msg
 set st_msg ""
 if {$status ne "OK"} {
     if {$free_edge_cnt > 0} {
-        set st_msg "free edges remain ($free_edge_cnt) -> tetmesh skipped"
+        set st_msg "표면 메시에 구멍(free edge) $free_edge_cnt 개가 남아 tetmesh 불가. STEP 에 solid 가 없거나(solids after import : 0) 면 사이가 벌어져 있음 -> CAD 에서 solid 로 다시 내보내기 권장"
     } elseif {$n_tet < $::YL_TET_MIN} {
         set st_msg "tetmesh produced only $n_tet elements (need >= $::YL_TET_MIN). 표면 메시가 닫히지 않았거나 겹침 -> hm_log.txt 의 'check:' 줄(free_edges/T_edges)과 'tetmesh <...>' 줄 확인"
         if {$YL_ERR ne ""} { set st_msg "Tcl error -> $YL_ERR" }
