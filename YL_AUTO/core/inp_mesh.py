@@ -304,6 +304,138 @@ def keep_largest_component(m: Mesh, min_frac_warn: float = 0.001) -> dict:
     return info
 
 
+def _tet_q(x, c):
+    """부호 있는 형상 품질 (정사면체 = 1, 납작 = 0, 뒤집힘 < 0).  x:(N,3)  c:(E,4)"""
+    p0, p1, p2, p3 = x[c[:, 0]], x[c[:, 1]], x[c[:, 2]], x[c[:, 3]]
+    v = np.einsum("ij,ij->i", np.cross(p1 - p0, p2 - p0), p3 - p0) / 6.0
+    l2 = (((p1 - p0) ** 2).sum(1) + ((p2 - p1) ** 2).sum(1) + ((p0 - p2) ** 2).sum(1)
+          + ((p3 - p0) ** 2).sum(1) + ((p3 - p1) ** 2).sum(1) + ((p3 - p2) ** 2).sum(1)) / 6.0
+    return 6 * math.sqrt(2) * v / np.maximum(l2, 1e-300) ** 1.5
+
+
+def improve_tet_quality(m: Mesh, q_target: float = 0.20, passes: int = 8) -> dict:
+    """[v14] 납작한 Tetra(sliver) 보정.
+    HyperMesh 단순 메시에는 품질 0.001 수준의 납작한 요소가 수천 개 섞여 나온다. 스웨징으로 눌리면
+    이 요소들이 뒤집혀(EXCESSIVE DISTORTION, NEGATIVE EIGENVALUES) Abaqus 가 발산한다.
+
+    방법 : 품질이 q_target 보다 낮은 요소에 붙은 **내부 절점**을 조금씩 옮겨 본다
+           (이웃 절점들의 중심 쪽 / 가장 나쁜 요소의 높이를 키우는 쪽). 그 절점에 붙은 요소들의
+           최소 품질이 좋아질 때만 채택한다. 표면 절점은 움직이지 않으므로 형상과 INNER/OUTER 는 그대로.
+    한계 : 네 절점이 모두 표면에 있는 납작한 요소는 고치지 못한다 (표면 메시 자체가 나쁜 경우)."""
+    if m.family not in ("tet4", "tet10"):
+        return {}
+    x = m.xyz
+    c = m.conn[:, :4]
+    E, N = len(c), len(x)
+    q0 = _tet_q(x, c)
+    info = {"q_min_before": float(q0.min()), "n_below_0p02_before": int((q0 < 0.02).sum()),
+            "n_below_0p1_before": int((q0 < 0.1).sum())}
+    # 표면 절점 (면을 한 요소만 쓰는 면의 절점)
+    f = np.sort(np.concatenate([c[:, list(t)] for t in TET4_FACES]), axis=1)
+    _, inv, cnt = np.unique(f, axis=0, return_inverse=True, return_counts=True)
+    on_bnd = np.zeros(N, bool)
+    on_bnd[np.unique(f[cnt[inv.ravel()] == 1])] = True
+    # 절점 -> 요소 (CSR)
+    order = np.argsort(c.ravel(), kind="stable")
+    elem_of = (np.arange(E * 4) // 4)[order]
+    start = np.searchsorted(c.ravel()[order], np.arange(N + 1))
+    moved = np.zeros(N, bool)
+    n_moves = 0
+    for _ in range(passes):
+        q = _tet_q(x, c)
+        bad = np.where(q < q_target)[0]
+        if len(bad) == 0:
+            break
+        nodes = np.unique(c[bad])
+        nodes = nodes[~on_bnd[nodes]]
+        if len(nodes) == 0:
+            break
+        worst = np.array([q[elem_of[start[n]:start[n + 1]]].min() for n in nodes])
+        improved = 0
+        for n in nodes[np.argsort(worst)]:
+            el = elem_of[start[n]:start[n + 1]]
+            ce = c[el]
+            qe = _tet_q(x, ce)
+            cur = qe.min()
+            if cur >= q_target:
+                continue
+            p = x[n].copy()
+            nb = np.unique(ce)
+            nb = nb[nb != n]
+            cen = x[nb].mean(0)
+            cands = [p + t * (cen - p) for t in (1.0, 0.6, 0.3, 0.1)]
+            # 가장 나쁜 요소 : 맞은편 면에서 멀어지는 방향(높이를 키움)
+            w = ce[qe.argmin()]
+            o = x[w[w != n]]
+            if len(o) == 3:
+                nrm = np.cross(o[1] - o[0], o[2] - o[0])
+                ln = np.linalg.norm(nrm)
+                if ln > 1e-300:
+                    nrm /= ln
+                    if np.dot(p - o[0], nrm) < 0:
+                        nrm = -nrm
+                    h = np.sqrt(ln / 2.0)                      # 면 크기 수준의 길이
+                    cands += [p + t * h * nrm for t in (0.6, 0.3, 0.15, 0.05)]
+            best, best_p = cur, None
+            for cp in cands:
+                x[n] = cp
+                qn = _tet_q(x, ce).min()
+                if qn > best + 1e-9:
+                    best, best_p = qn, cp
+            x[n] = p if best_p is None else best_p
+            if best_p is not None:
+                moved[n] = True
+                improved += 1
+        n_moves += improved
+        if improved == 0:
+            break
+    if m.family == "tet10" and moved.any():
+        # 옮긴 절점에 붙은 모서리의 중간절점을 다시 모서리 가운데로
+        for k, (i, j) in enumerate(TET10_EDGES):
+            a, b = m.conn[:, i], m.conn[:, j]
+            sel = moved[a] | moved[b]
+            x[m.conn[sel, 4 + k]] = 0.5 * (x[a[sel]] + x[b[sel]])
+    q1 = _tet_q(x, c)
+    bad_left = np.where(q1 < 0.02)[0]
+    info.update({"q_min_after": float(q1.min()), "n_below_0p02_after": int(len(bad_left)),
+                 "n_below_0p1_after": int((q1 < 0.1).sum()), "nodes_moved": int(moved.sum()),
+                 "n_all_surface_slivers": int(on_bnd[c[bad_left]].all(1).sum())})
+    m.note(f"납작한 Tetra 보정: 품질<0.02 {info['n_below_0p02_before']} -> {info['n_below_0p02_after']}개, "
+           f"품질<0.1 {info['n_below_0p1_before']} -> {info['n_below_0p1_after']}개, "
+           f"최소 품질 {info['q_min_before']:.4f} -> {info['q_min_after']:.4f} (내부 절점 {info['nodes_moved']}개 이동)")
+    return info
+
+
+def remove_surface_slivers(m: Mesh, q_max: float = 0.02) -> int:
+    """[v14] 표면에 납작하게 붙은 Tetra 삭제.
+    네 절점이 모두 표면에 있고 면 하나 이상이 표면인 품질 < q_max 요소는 부피가 거의 0 인 '껍질'이다.
+    절점을 옮겨서는 못 고치므로 요소를 지운다 (그 안쪽 면이 새 표면이 됨, 형상 변화는 요소 부피만큼 = 거의 0)."""
+    if m.family not in ("tet4", "tet10"):
+        return 0
+    x, c = m.xyz, m.conn[:, :4]
+    q = _tet_q(x, c)
+    f = np.sort(np.concatenate([c[:, list(t)] for t in TET4_FACES]), axis=1)      # (4E,3) 면0 전체, 면1 전체 ...
+    _, inv, cnt = np.unique(f, axis=0, return_inverse=True, return_counts=True)
+    is_b = (cnt[inv.ravel()] == 1)
+    on_bnd = np.zeros(len(x), bool)
+    on_bnd[np.unique(f[is_b])] = True
+    nbf = is_b.reshape(4, len(c)).sum(0)
+    kill = (q < q_max) & on_bnd[c].all(1) & (nbf >= 1)
+    n = int(kill.sum())
+    if n == 0:
+        return 0
+    m.conn = m.conn[~kill]
+    m.elem_ids = m.elem_ids[~kill]
+    used = np.unique(m.conn)
+    remap = -np.ones(len(x), dtype=np.int64)
+    remap[used] = np.arange(len(used))
+    m.conn = remap[m.conn]
+    m.xyz = m.xyz[used]
+    m.node_ids = m.node_ids[used]
+    m.note(f"표면에 납작하게 붙은 Tetra {n}개 삭제 (품질 < {q_max})")
+    return n
+
+
 def tet_quality(m: Mesh) -> dict:
     """품질 지표: 정규화 체적비(가장 나쁜 요소), tet10 중간절점 이탈률."""
     x, c = m.xyz, m.conn

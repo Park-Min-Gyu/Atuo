@@ -137,16 +137,25 @@ def stage_mesh(cfg, m, es, tag_dir, force):
     if out_inp.exists() and not force:
         st = runners.read_kv(mesh_dir / "hm_status.txt")
         ok, why = runners.tet_count_ok(st, cfg["hypermesh"].get("tet_min_ratio", 0.25))
-        if st.get("STATUS") == "OK" and ok:
+        want_gmsh = str(cfg["mesh"].get("mesher", "hypermesh")).lower() == "gmsh"
+        if st.get("STATUS") == "OK" and ok and (not want_gmsh or st.get("ALGO") == "GMSH_FALLBACK"
+                                               or not runners.gmsh_available()):
             return st
         if st.get("STATUS") == "OK":
             log(f"[{m['name']}] 이전 메시 재사용 안 함 ({why}) -> HyperMesh 다시 실행")
     hm = cfg["hypermesh"]
+    if str(cfg["mesh"].get("mesher", "hypermesh")).lower() == "gmsh":
+        # [v14] gmsh 를 주 메셔로 (Netgen 최적화로 납작한 Tetra 가 적음). 실패하면 HyperMesh 로.
+        gs = runners.run_gmsh(cfg.get("gmsh_fallback", {}), src, mesh_dir, m["name"], es)
+        if gs.get("STATUS") == "OK":
+            return gs
+        log(f"[{m['name']}] gmsh 메시 실패 ({gs.get('MESSAGE', '')}) -> HyperMesh 로 시도")
     st = runners.run_hypermesh(hm, resolve(cfg, hm.get("tcl", "hypermesh/YL_V5_batch.tcl")), src, mesh_dir,
                                m["name"], es, cfg["mesh"].get("elem_type", "C3D10H"))
     # [v9] HyperMesh 가 끝까지 실패하면 예비 메셔(gmsh)로 한 번 더 시도
     g_cfg = cfg.get("gmsh_fallback", {})
-    if st.get("STATUS") != "OK" and g_cfg.get("enabled", True):
+    if st.get("STATUS") != "OK" and g_cfg.get("enabled", True) \
+            and str(cfg["mesh"].get("mesher", "hypermesh")).lower() != "gmsh":
         log(f"[{m['name']}] HyperMesh 메시 실패 ({st.get('MESSAGE', '')}) -> 예비 메셔 gmsh 시도 ...")
         gs = runners.run_gmsh(g_cfg, src, mesh_dir, m["name"], es)
         if gs.get("STATUS") == "OK":
@@ -177,6 +186,17 @@ def stage_build(cfg, m, es, tag, tag_dir, mat, dialect):
         inp_mesh.upgrade_tet4_to_tet10(mesh)
     inp_mesh.fix_tet10_midside_order(mesh)
     inp_mesh.fix_orientation(mesh)
+    # [v14] 납작한 Tetra 보정 (발산의 주원인). mesh.repair_quality=false 로 끌 수 있음
+    repair = {}
+    if cfg["mesh"].get("repair_quality", True) and mesh.family in ("tet4", "tet10"):
+        repair = inp_mesh.improve_tet_quality(mesh)
+        n_del = inp_mesh.remove_surface_slivers(mesh)
+        if n_del:
+            comp2 = inp_mesh.keep_largest_component(mesh)
+            r2 = inp_mesh.improve_tet_quality(mesh)
+            repair.update({k: r2[k] for k in r2 if k.endswith("_after") or k == "n_all_surface_slivers"})
+            repair["nodes_moved"] = repair.get("nodes_moved", 0) + r2.get("nodes_moved", 0)
+        repair["surface_slivers_deleted"] = n_del
     shape_mode = str(gcfg.get("shape_mode", "general")).lower()
     if gcfg.get("inner_r_max") is not None or gcfg.get("outer_r_min") is not None:
         shape_mode = "cylinder"      # 반경을 직접 지정한 모델은 예전 방식 그대로
@@ -217,7 +237,7 @@ def stage_build(cfg, m, es, tag, tag_dir, mat, dialect):
                                  inner_constraint=cfg.get("inner_constraint", "rigid_body"))
     info = {"model": m["name"], "elem_size": es, "tag": tag, "source_inp": str(src), "dialect": dialect,
             "rp_id": winfo["rp_id"], "element_type": winfo["element_type"], "axis": ax_info,
-            "sets": sets.info, "quality": q, "features": feats, "mesh_log": mesh.log, "components": comp,
+            "sets": sets.info, "quality": q, "features": feats, "mesh_log": mesh.log, "components": comp, "quality_repair": repair,
             "material": {k: mat[k] for k in ("name", "mu", "alpha", "D", "mu0", "K0")}, "jobs": jobs,
             "combined": combined}
     (tag_dir / "model_info.json").write_text(json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -589,6 +609,15 @@ def main():
                         f"INNER={info['sets']['inner_nodes']} OUTER={info['sets']['outer_nodes']} "
                         f"jobs={len(info['jobs'])}"
                         + (f" -> 통합 Job 1개 ({info['combined']['job']}.odb)" if info.get("combined") else ""))
+                    rq = info.get("quality_repair") or {}
+                    if rq:
+                        log(f"[{tag}] 메시 품질 보정: 품질<0.02 요소 {rq['n_below_0p02_before']} -> {rq['n_below_0p02_after']}개, "
+                            f"<0.1 요소 {rq['n_below_0p1_before']} -> {rq['n_below_0p1_after']}개, 최소 품질 "
+                            f"{rq['q_min_before']:.4f} -> {rq['q_min_after']:.4f} "
+                            f"(절점 {rq['nodes_moved']}개 이동, 표면 껍질 요소 {rq.get('surface_slivers_deleted', 0)}개 삭제)")
+                        if rq["n_below_0p02_after"] > 0:
+                            log(f"[{tag}] WARNING 품질<0.02 요소가 {rq['n_below_0p02_after']}개 남았습니다 -> 큰 스웨징에서 발산할 수 있음. "
+                                f"pip install gmsh 후 config 의 mesh.mesher 를 'gmsh' 로 하면 품질이 더 좋은 메시를 씁니다")
                     if info["sets"].get("method"):
                         tb = [round(v, 3) for v in info["axis"].get("translated_by", [0, 0, 0])]
                         log(f"[{tag}] 형상 판별: 축={info['axis']['source_axis']} -> +Y, 원점 이동 {tb} mm, "
