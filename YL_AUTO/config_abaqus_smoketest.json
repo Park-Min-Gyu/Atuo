@@ -31,6 +31,7 @@
   "shape_mode": "general",
   "center": "auto",
   "swage_mode": "auto",
+  "outer_mode": "hull",
   "inner_tol_mm": 0.5,
   "outer_tol_mm": 0.5,
   "normal_cos_min": 0.6

@@ -181,7 +181,7 @@ def stage_build(cfg, m, es, tag, tag_dir, mat, dialect):
     gcfg = dict(cfg.get("geometry", {}))
     gcfg.update({k: v for k, v in m.items() if k in ("axis", "center", "inner_tol_mm", "outer_tol_mm",
                                                        "inner_r_max", "outer_r_min", "normal_cos_min", "elsets",
-                                                       "inner_mode", "connect_rmax_frac", "shape_mode", "swage_mode")})
+                                                       "inner_mode", "connect_rmax_frac", "shape_mode", "swage_mode", "outer_mode")})
     src = tag_dir / "mesh" / f"{m['name']}_hm.inp"
     mesh = inp_mesh.read_inp_mesh(src, gcfg.get("elsets"))
     inp_mesh.check_mesh_sane(mesh, int(cfg["mesh"].get("min_elems", 50)))
@@ -212,7 +212,7 @@ def stage_build(cfg, m, es, tag, tag_dir, mat, dialect):
         ax_info, sets = shape_general.setup_general(
             mesh, gcfg.get("axis", "auto"), gcfg.get("center", "auto"), gcfg.get("normal_cos_min", 0.6),
             gcfg.get("inner_tol_mm", 0.5), gcfg.get("outer_tol_mm", 0.5), gcfg.get("inner_mode", "connected"),
-            gcfg.get("swage_mode", "auto"))
+            gcfg.get("swage_mode", "auto"), gcfg.get("outer_mode", "hull"))
     else:
         c_old = gcfg.get("center", "none")
         ax_info = inp_mesh.align_axis_to_y(mesh, gcfg.get("axis", "auto"), "none" if c_old == "auto" else c_old)

@@ -164,7 +164,7 @@ def find_axis(m: Mesh, faces, nrm, area, axis: str = "auto") -> tuple[np.ndarray
 # ---------------------------------------------------------------------------
 def setup_general(m: Mesh, axis: str = "auto", center: str = "auto", cos_min: float = 0.6,
                   inner_tol: float = 0.5, outer_tol: float = 0.5, inner_mode: str = "connected",
-                  swage_mode: str = "auto") -> tuple[dict, SetResult]:
+                  swage_mode: str = "auto", outer_mode: str = "hull") -> tuple[dict, SetResult]:
     faces, nrm, cen, area = inp_mesh.boundary_faces(m)
     a, ax_info = find_axis(m, faces, nrm, area, axis)
     R = rotation_to_y(a)
@@ -200,6 +200,46 @@ def setup_general(m: Mesh, axis: str = "auto", center: str = "auto", cos_min: fl
 
     # OUTER : 바깥 윤곽과 맞닿은 옆면
     sel_out = lateral & (l_out == fp["ext"])
+    # [v16] OUTER = 바깥 슬리브(금속)에 붙는 면만.
+    #   v12 는 '그림자 바깥 윤곽에 닿는 옆면'을 전부 OUTER 로 잡아서, 노치 안쪽 벽, 공극(창)으로 열린 면,
+    #   보어 둘레의 얇은 고무 막 바깥면까지 OUTER 가 됐다 (Part3, Part50 발산 원인).
+    #   슬리브는 볼록한 통이라 오목하게 들어간 곳에는 닿지 못한다 -> 그림자의 볼록 껍질(convex hull)에서
+    #   outer_tol 안쪽에 있는 면만 OUTER 로 한다. 원통이면 예전(v11)의 '최대 반경 띠'와 같다.
+    hull_depth = None
+    sleeve_round = None
+    if (outer_mode or "hull").lower() == "hull":
+        from scipy.spatial import ConvexHull
+        pix = (np.argwhere(fp["grid"]) + 0.5) * fp["cell"] + fp["lo"]
+        hull = ConvexHull(pix)
+        eq = hull.equations                                   # n.x + d <= 0 (안쪽)
+        dep = -(p2 @ eq[:, :2].T + eq[:, 2])
+        hull_depth = dep.min(axis=1)
+        k_edge = dep.argmin(axis=1)
+        # (1) 볼록 껍질 가까이 있고 (2) 면이 껍질 바깥 방향을 향하는 면 (창 옆벽처럼 껍질과 직각인 면 제외)
+        facing = np.einsum("ij,ij->i", d2, eq[k_edge, :2]) > cos_min
+        sel_out = sel_out & (hull_depth <= outer_tol + 1.5 * fp["cell"]) & facing
+        # (3) 슬리브가 원통이면 (OUTER 면이 한 원 위에 있으면) 그 원에서 outer_tol 안의 면만.
+        #     껍질 기준만으로는 얕은 노치 바닥(현(chord)에서 1 mm 미만 들어간 면)이 남는다.
+        if sel_out.sum() >= 12:
+            # 노치 바닥 같은 면이 섞여 있어도 원을 찾도록, 원에서 먼 면을 빼 가며 3번 다시 맞춤
+            q, w = p2[sel_out], area[sel_out]
+            use = np.ones(len(q), bool)
+            for _ in range(4):
+                A = np.c_[2 * q[use, 0], 2 * q[use, 1], np.ones(use.sum())] * np.sqrt(w[use])[:, None]
+                bb = (q[use] ** 2).sum(1) * np.sqrt(w[use])
+                sol, *_ = np.linalg.lstsq(A, bb, rcond=None)
+                R = math.sqrt(max(sol[2] + sol[0] ** 2 + sol[1] ** 2, 0.0))
+                res = np.abs(np.hypot(q[:, 0] - sol[0], q[:, 1] - sol[1]) - R)
+                lim = max(0.01 * R, outer_tol)
+                new = res <= max(lim, np.percentile(res, 50))
+                if new.sum() < 12 or np.array_equal(new, use):
+                    break
+                use = new
+            frac = float(w[res <= lim].sum() / w.sum())
+            sleeve_round = bool(R > 0 and frac >= 0.6)
+            if sleeve_round:                     # OUTER 면적의 60% 이상이 한 원 위 -> 원통 슬리브
+                rc = np.hypot(p2[:, 0] - sol[0], p2[:, 1] - sol[1])
+                sel_out = sel_out & (np.abs(rc - R) <= outer_tol + fp["cell"])
     # INNER 씨앗 : 보어 구멍과 맞닿은 옆면
     seed = lateral & (l_in == bore["label"])
     if not seed.any() or not sel_out.any():
@@ -260,7 +300,14 @@ def setup_general(m: Mesh, axis: str = "auto", center: str = "auto", cos_min: fl
     # ---- 5) 스웨징 방향 (OUTER 절점별, XZ 평면 단위벡터, 바깥쪽이 +) ----
     xo = x[outer]
     ro = np.hypot(xo[:, 0], xo[:, 2])
-    outer_round = bool(ro.min() > 1e-9 and (ro.max() - ro.min()) <= max(0.01 * ro.mean(), outer_tol))
+    # 원 맞춤 잔차로 판정 (반경 최소~최대 차이로 보면 0.3 mm 만 치우쳐도 비원형으로 갈렸음)
+    Ao = np.c_[2 * xo[:, 0], 2 * xo[:, 2], np.ones(len(xo))]
+    so, *_ = np.linalg.lstsq(Ao, xo[:, 0] ** 2 + xo[:, 2] ** 2, rcond=None)
+    ro_fit = math.sqrt(max(so[2] + so[0] ** 2 + so[1] ** 2, 0.0))
+    ro_res = np.abs(np.hypot(xo[:, 0] - so[0], xo[:, 2] - so[1]) - ro_fit)
+    outer_round = bool(ro.min() > 1e-9 and ro_res.max() <= max(0.01 * ro_fit, outer_tol))
+    if sleeve_round is not None:
+        outer_round = sleeve_round       # 슬리브 원 판정 결과를 그대로 사용 (노치 가장자리 몇 점에 흔들리지 않게)
     mode = swage_mode.lower()
     if mode == "auto":
         mode = "radial" if outer_round else "normal"
@@ -295,6 +342,8 @@ def setup_general(m: Mesh, axis: str = "auto", center: str = "auto", cos_min: fl
         "inner_is_round": inner_round,
         "outer_is_round": outer_round,
         "swage_direction": mode,
+        "outer_mode": outer_mode,
+        "outer_hull_depth_max_mm": float(hull_depth[sel_out].max()) if hull_depth is not None else None,
         "n_through_holes": len(fp["holes"]),
         "bore_hole_area_mm2": bore["area"],
         "footprint_cell_mm": cell,
