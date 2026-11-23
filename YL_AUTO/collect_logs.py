@@ -58,7 +58,8 @@ def main():
                 lines.append("  (폴더 없음)")
         z.writestr("folder_listing.txt", "\n".join(lines))
         for p in sorted(work.rglob("*")):
-            if not p.is_file() or p == out or p.name.startswith("YL_logs_") or p.resolve() == cfg_path:
+            if not p.is_file() or p == out or p.name.startswith("YL_logs_") or p.resolve() == cfg_path \
+                    or "_engine" in p.parts:   # [v20] YL_V10 에서 꺼낸 엔진 Tcl 은 원본 ps1 과 같으므로 제외
                 continue
             ext = p.suffix.lower()
             arc = str(p.relative_to(work))

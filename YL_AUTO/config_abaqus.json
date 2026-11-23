@@ -9,6 +9,13 @@
   "args": [
    "-tcl"
   ],
+  "engine": "v10",
+  "v10_ps1": "hypermesh/YL_V10/YL_V10.ps1",
+  "v10_aspect": 5.0,
+  "v10_v8_fallback": true,
+  "v10_fillet_rows": "altair",
+  "v10_then_v5": false,
+  "_comment_engine": "engine: v10 (연구실 YL_V10 = BatchMesher 스킨 -> 실패 시 V8 -> Tetra+INP) | v5 (예전 YL_V5_batch.tcl). v10 이 실패하면 gmsh 예비 메셔. v10_then_v5: true 면 그 사이에 예전 V5 도 시도",
   "tcl": "hypermesh/YL_V5_batch.tcl",
   "timeout_min": 60,
   "start_menu_dir": "C:/ProgramData/Microsoft/Windows/Start Menu/Programs/Altair 2019",

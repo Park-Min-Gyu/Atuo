@@ -66,7 +66,12 @@ def find_hmbatch(hm_cfg: dict) -> tuple[str | None, str]:
                     cands += [root / "hm/bin/win64/hmbatch.exe", root / "hwdesktop/hm/bin/win64/hmbatch.exe"]
             cands.append(p.parent / "hmbatch.exe")
     cands += [Path(x) for x in HM_DEFAULTS]
-    for pat in ("C:/Program Files/Altair/*/hm/bin/win64/hmbatch.exe", "D:/Program Files/Altair/*/hm/bin/win64/hmbatch.exe"):
+    import os
+    if os.environ.get("YL_HMBATCH"):          # YL_V10 과 같은 환경변수
+        cands.insert(0, Path(os.environ["YL_HMBATCH"]))
+    # YL_V10 에서 확인된 두 가지 설치 형태 (.../2019/hm/... 와 .../2019/2019/hm/...)
+    for pat in ("C:/Program Files/Altair/*/hm/bin/win64/hmbatch.exe", "D:/Program Files/Altair/*/hm/bin/win64/hmbatch.exe",
+                "C:/Program Files/Altair/*/*/hm/bin/win64/hmbatch.exe"):
         cands += [Path(x) for x in sorted(glob.glob(pat))]
     for c in cands:
         if c.exists():

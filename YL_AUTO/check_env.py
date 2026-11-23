@@ -49,9 +49,26 @@ else:
     print("  [NG] hmbatch.exe 를 못 찾음. config_abaqus.json 의 hypermesh.exe 에 전체 경로를 적어주세요.")
     print("       보통 위치: C:/Program Files/Altair/2019/hm/bin/win64/hmbatch.exe")
     print("       (.inp 형상만 쓸 거면 HyperMesh 없이도 됩니다)")
-tcl = cfg_path.parent / hm_cfg.get("tcl", "hypermesh/YL_V5_batch.tcl")
-print(f"  [{'OK' if tcl.exists() else 'NG'}] YL_V5 tcl: {tcl}")
-ok = ok and tcl.exists()
+engine = str(hm_cfg.get("engine", "v10")).lower()
+if engine == "v10":
+    ps1 = cfg_path.parent / hm_cfg.get("v10_ps1", "hypermesh/YL_V10/YL_V10.ps1")
+    good = ps1.exists()
+    if good:
+        try:
+            from core import yl_v10
+            import tempfile
+            info = yl_v10.extract_engine(ps1, Path(tempfile.mkdtemp()))
+            print(f"  [OK] YL_V10 엔진: {ps1}  ({', '.join(info['files'])})")
+        except Exception as e:
+            good = False
+            print(f"  [NG] YL_V10.ps1 에서 엔진을 꺼내지 못함: {e}")
+    else:
+        print(f"  [NG] YL_V10.ps1 없음: {ps1}")
+    ok = ok and good
+else:
+    tcl = cfg_path.parent / hm_cfg.get("tcl", "hypermesh/YL_V5_batch.tcl")
+    print(f"  [{'OK' if tcl.exists() else 'NG'}] YL_V5 tcl: {tcl}")
+    ok = ok and tcl.exists()
 
 print("\n[Abaqus]")
 abq, how = findexe.find_abaqus(cfg.get("abaqus", {}))

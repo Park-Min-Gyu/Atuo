@@ -33,7 +33,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from core import findexe, inp_mesh, inp_writer, ogden, results, runners, shape_general  # noqa: E402
+from core import findexe, inp_mesh, inp_writer, ogden, results, runners, shape_general, yl_v10  # noqa: E402
 
 STAGES = ["mesh", "build", "run", "extract", "report"]
 CAD_EXT = {".stp", ".step", ".igs", ".iges", ".x_t", ".x_b", ".catpart", ".prt", ".sat", ".hm"}
@@ -142,6 +142,10 @@ def stage_mesh(cfg, m, es, tag_dir, force):
         if st.get("STATUS") == "OK" and ok and int(st.get("FIXED_SIZE", 0) or 0) != want_fixed:
             ok = False
             log(f"[{m['name']}] 메시 크기 설정(fixed_size={want_fixed})이 이전 메시와 달라 다시 메시합니다")
+        want_v10 = str(cfg["hypermesh"].get("engine", "v10")).lower() == "v10"
+        if st.get("STATUS") == "OK" and ok and want_v10 and not str(st.get("ALGO", "")).startswith(("YL_V10", "GMSH")):
+            ok = False
+            log(f"[{m['name']}] 이전 메시는 예전 엔진({st.get('ALGO', '?')})으로 만든 것 -> YL_V10 으로 다시 메시합니다")
         want_gmsh = str(cfg["mesh"].get("mesher", "hypermesh")).lower() == "gmsh"
         if st.get("STATUS") == "OK" and ok and (not want_gmsh or st.get("ALGO") == "GMSH_FALLBACK"
                                                or not runners.gmsh_available()):
@@ -158,8 +162,19 @@ def stage_mesh(cfg, m, es, tag_dir, force):
         if gs.get("STATUS") == "OK":
             return gs
         log(f"[{m['name']}] gmsh 메시 실패 ({gs.get('MESSAGE', '')}) -> HyperMesh 로 시도")
-    st = runners.run_hypermesh(hm, resolve(cfg, hm.get("tcl", "hypermesh/YL_V5_batch.tcl")), src, mesh_dir,
-                               m["name"], es, cfg["mesh"].get("elem_type", "C3D10H"))
+    engine = str(hm.get("engine", "v10")).lower()
+    if engine == "v10":
+        # [v20] 연구실 YL_V10 (BatchMesher 스킨 -> 실패 시 V8 -> 같은 세션에서 Tetra + INP)
+        ps1 = resolve(cfg, hm.get("v10_ps1", "hypermesh/YL_V10/YL_V10.ps1"))
+        st = yl_v10.run_v10(hm, ps1, src, mesh_dir, m["name"], es, cfg["mesh"].get("elem_type", "C3D10H"),
+                            hm["fixed_size"])
+        if st.get("STATUS") != "OK" and hm.get("v10_then_v5", False):
+            log(f"[{m['name']}] YL_V10 실패 ({st.get('MESSAGE', '')}) -> 예전 YL_V5 엔진으로 시도")
+            st = runners.run_hypermesh(hm, resolve(cfg, hm.get("tcl", "hypermesh/YL_V5_batch.tcl")), src, mesh_dir,
+                                       m["name"], es, cfg["mesh"].get("elem_type", "C3D10H"))
+    else:
+        st = runners.run_hypermesh(hm, resolve(cfg, hm.get("tcl", "hypermesh/YL_V5_batch.tcl")), src, mesh_dir,
+                                   m["name"], es, cfg["mesh"].get("elem_type", "C3D10H"))
     # [v9] HyperMesh 가 끝까지 실패하면 예비 메셔(gmsh)로 한 번 더 시도
     if st.get("STATUS") != "OK" and g_cfg.get("enabled", True) \
             and str(cfg["mesh"].get("mesher", "hypermesh")).lower() != "gmsh":
@@ -600,6 +615,13 @@ def main():
                     if st.get("AREA_API", None) == "" and st.get("ALGO") != "GMSH_FALLBACK":
                         log(f"[{tag}] 주의: HyperMesh 에서 면적 함수를 못 써서 작은 면 자동 무시(defeature)가 "
                             f"제대로 안 됐을 수 있습니다 (hm_log.txt 의 'defeature' 줄 확인)")
+                    if str(st.get("ALGO", "")).startswith("YL_V10"):
+                        log(f"[{tag}] YL_V10 엔진={st.get('ENGINE')} ({st.get('MESHER')}) 2D 합격={st.get('PASS2D')} "
+                            f"스킨 Tria={st.get('N_TRIA')} q평균={st.get('Q_MEAN')} | Tetra={st.get('N_TET')} "
+                            f"aspect p95={st.get('TET_ASP_P95')} collapse<0.15={st.get('TET_COL_LT015')}% "
+                            f"성장률={st.get('TET_GROWTH')}")
+                        if st.get("ENGINE") == "V9>V8":
+                            log(f"[{tag}] 주의: BatchMesher(V9) 스킨이 합격하지 못해 V8 엔진으로 다시 메시했습니다")
                     if st.get("ALGO") == "FALLBACK_SIMPLE":
                         log(f"[{tag}] 주의: YL_V4 메시 알고리즘이 실패해 단순 메시(전체 면 Tria -> Tetra)로 대신 만들었습니다. "
                             f"원인: {st.get('V4_ERROR') or 'V4 단계에서 Tetra 0개'}")
