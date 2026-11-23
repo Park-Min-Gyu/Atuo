@@ -624,7 +624,7 @@ def main():
                             f"(절점 {rq['nodes_moved']}개 이동, 표면 껍질 요소 {rq.get('surface_slivers_deleted', 0)}개 삭제)")
                         if rq["n_below_0p02_after"] > 0:
                             log(f"[{tag}] WARNING 품질<0.02 요소가 {rq['n_below_0p02_after']}개 남았습니다 -> 큰 스웨징에서 발산할 수 있음. "
-                                f"pip install gmsh 후 config 의 mesh.mesher 를 'gmsh' 로 하면 품질이 더 좋은 메시를 씁니다")
+                                f"(HyperMesh 메시라면 config 의 mesh.mesher 를 'gmsh' 로 바꿔 비교해 볼 것)")
                     if info["sets"].get("method"):
                         tb = [round(v, 3) for v in info["axis"].get("translated_by", [0, 0, 0])]
                         log(f"[{tag}] 형상 판별: 축={info['axis']['source_axis']} -> +Y, 원점 이동 {tb} mm, "
