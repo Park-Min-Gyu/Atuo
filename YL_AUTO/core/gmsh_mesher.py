@@ -27,7 +27,10 @@ def mesh(src: str, out: str, size: float, min_ratio: float = 0.15, threads: int 
     #   3D: 1=Delaunay, 10=HXT
     #   [v17] 4, 5번 : 불러올 때 OCC 형상 수리(퇴화 모서리/작은 모서리·면 정리, 면 꿰매기, solid 만들기) +
     #                  MeshAdapt. 'Impossible to mesh periodic surface' (Part2) 같은 면 하나 실패용.
-    recipes = [(6, 1, 1.0, False), (5, 10, 1.0, False), (6, 1, 0.5, False), (1, 1, 1.0, True), (1, 10, 0.5, True)]
+    #   [v18] Part2 : 'full' 수리는 'Could not fix wire in surface 114' 로 불러오기 단계에서 실패했다.
+    #         그래서 MeshAdapt 를 수리 없이(3번), 면 꿰매기만 하는 가벼운 수리로(5번) 따로 시도한다.
+    recipes = [(6, 1, 1.0, None), (5, 10, 1.0, None), (1, 1, 1.0, None), (6, 1, 0.5, None),
+               (1, 1, 1.0, "sew"), (1, 10, 0.5, "full")]
     last_err = ""
     for i, (a2, a3, mfac, fix) in enumerate(recipes, 1):
         t0 = time.time()
@@ -37,7 +40,9 @@ def mesh(src: str, out: str, size: float, min_ratio: float = 0.15, threads: int 
             gmsh.option.setNumber("General.NumThreads", threads)
             gmsh.model.add("m")
             if fix:
-                for opt in ("OCCFixDegenerated", "OCCFixSmallEdges", "OCCFixSmallFaces", "OCCSewFaces", "OCCMakeSolids"):
+                opts = ("OCCSewFaces", "OCCMakeSolids") if fix == "sew" else \
+                       ("OCCFixDegenerated", "OCCFixSmallEdges", "OCCFixSmallFaces", "OCCSewFaces", "OCCMakeSolids")
+                for opt in opts:
                     gmsh.option.setNumber(f"Geometry.{opt}", 1)
             gmsh.model.occ.importShapes(src)
             gmsh.model.occ.synchronize()
@@ -79,7 +84,7 @@ def mesh(src: str, out: str, size: float, min_ratio: float = 0.15, threads: int 
             return {"ok": True, "n_tet": n_tet, "n_node": n_node, "recipe": i, "n_vol": len(vols),
                     "elapsed_s": round(time.time() - t0, 1), "error": "", "healed": healed}
         except Exception as e:  # 다음 설정으로 재시도
-            last_err = f"recipe {i} (2D={a2}, 3D={a3}{', 형상수리' if fix else ''}): {e}"
+            last_err = f"recipe {i} (2D={a2}, 3D={a3}{f', 형상수리={fix}' if fix else ''}): {e}"
             print("gmsh 시도 실패 ->", last_err, flush=True)
         finally:
             gmsh.finalize()
