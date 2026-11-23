@@ -22,16 +22,23 @@ GMSH_EXT = {".stp", ".step", ".igs", ".iges", ".brep"}
 def mesh(src: str, out: str, size: float, min_ratio: float = 0.15, threads: int = 4) -> dict:
     import gmsh
 
-    # (2D 알고리즘, 3D 알고리즘, 최소크기 배율)  6=Frontal-Delaunay, 5=Delaunay, 1=Delaunay3D, 10=HXT
-    recipes = [(6, 1, 1.0), (5, 10, 1.0), (6, 1, 0.5)]
+    # (2D 알고리즘, 3D 알고리즘, 최소크기 배율, 형상 자동수리)
+    #   2D: 6=Frontal-Delaunay, 5=Delaunay, 1=MeshAdapt (복잡한 곡면에 가장 튼튼함)
+    #   3D: 1=Delaunay, 10=HXT
+    #   [v17] 4, 5번 : 불러올 때 OCC 형상 수리(퇴화 모서리/작은 모서리·면 정리, 면 꿰매기, solid 만들기) +
+    #                  MeshAdapt. 'Impossible to mesh periodic surface' (Part2) 같은 면 하나 실패용.
+    recipes = [(6, 1, 1.0, False), (5, 10, 1.0, False), (6, 1, 0.5, False), (1, 1, 1.0, True), (1, 10, 0.5, True)]
     last_err = ""
-    for i, (a2, a3, mfac) in enumerate(recipes, 1):
+    for i, (a2, a3, mfac, fix) in enumerate(recipes, 1):
         t0 = time.time()
         gmsh.initialize()
         try:
             gmsh.option.setNumber("General.Terminal", 0)
             gmsh.option.setNumber("General.NumThreads", threads)
             gmsh.model.add("m")
+            if fix:
+                for opt in ("OCCFixDegenerated", "OCCFixSmallEdges", "OCCFixSmallFaces", "OCCSewFaces", "OCCMakeSolids"):
+                    gmsh.option.setNumber(f"Geometry.{opt}", 1)
             gmsh.model.occ.importShapes(src)
             gmsh.model.occ.synchronize()
             vols = [t for _, t in gmsh.model.getEntities(3)]
@@ -72,7 +79,7 @@ def mesh(src: str, out: str, size: float, min_ratio: float = 0.15, threads: int 
             return {"ok": True, "n_tet": n_tet, "n_node": n_node, "recipe": i, "n_vol": len(vols),
                     "elapsed_s": round(time.time() - t0, 1), "error": "", "healed": healed}
         except Exception as e:  # 다음 설정으로 재시도
-            last_err = f"recipe {i} (2D={a2}, 3D={a3}): {e}"
+            last_err = f"recipe {i} (2D={a2}, 3D={a3}{', 형상수리' if fix else ''}): {e}"
             print("gmsh 시도 실패 ->", last_err, flush=True)
         finally:
             gmsh.finalize()
