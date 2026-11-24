@@ -311,9 +311,17 @@ def _abaqus_launch_errors(run_dir: Path, job: str) -> list:
     return (bad or lines[-6:])[:8]
 
 
-def _abaqus_started(run_dir: Path, job: str) -> bool:
-    """Abaqus 가 실제로 Job 을 시작했는지 (.dat/.sta/.msg/.odb/.com 중 하나라도 새로 생겼는지)"""
-    return any((run_dir / f"{job}{ext}").exists() for ext in (".dat", ".sta", ".msg", ".odb", ".com"))
+def _abaqus_started(run_dir: Path, job: str, since: float = 0.0) -> bool:
+    """Abaqus 가 실제로 Job 을 시작했는지 (.dat/.sta/.msg/.odb/.com 중 하나라도 since 이후에 새로 생겼는지).
+    [v22] since 를 안 보면 지난번 실행이 남긴 파일 때문에, 이번에 시작도 못 했는데 시작한 것으로 착각한다."""
+    for ext in (".dat", ".sta", ".msg", ".odb", ".com"):
+        f = run_dir / f"{job}{ext}"
+        try:
+            if f.exists() and f.stat().st_mtime >= since - 2:
+                return True
+        except OSError:
+            pass
+    return False
 
 
 def sta_progress(run_dir: Path, job: str) -> dict:
@@ -355,6 +363,7 @@ def run_abaqus(abq_cfg: dict, run_dir: Path, job: str) -> dict:
         except OSError:
             pass
     timeout_s = abq_cfg.get("timeout_min", 120) * 60
+    t_start = time.time()
     rc, dt, used = None, 0.0, ""
     launch_notes = []
     for k, parts in enumerate(tries, 1):
@@ -363,7 +372,7 @@ def run_abaqus(abq_cfg: dict, run_dir: Path, job: str) -> dict:
         if rc == "timeout":
             subprocess.run(f"{exe} terminate job={job}", cwd=str(run_dir), shell=True)
             break
-        if _abaqus_started(run_dir, job):
+        if _abaqus_started(run_dir, job, t_start):
             break
         # Job 파일이 하나도 안 생김 = abaqus 명령 자체가 거부됨 -> 옵션을 줄여 다시
         launch_notes.append(f"시도{k} [{used}] -> " + " / ".join(_abaqus_launch_errors(run_dir, job)[:3]))
@@ -374,11 +383,15 @@ def run_abaqus(abq_cfg: dict, run_dir: Path, job: str) -> dict:
             (run_dir / f"{job}.runlog").rename(keep)
         except OSError:
             pass
-    s = abaqus_status(run_dir, job)
+    started = _abaqus_started(run_dir, job, t_start)
+    if started:
+        s = abaqus_status(run_dir, job)
+    else:   # 이번에 시작 못 함 -> 폴더에 남은 지난번 .sta/.odb 를 이번 결과로 읽지 않음
+        s = {"odb": False, "completed": False, "errors": [], "n_warnings": 0, "n_increments": 0, "cutbacks": 0}
     s["returncode"] = rc
     s["elapsed_s"] = round(dt, 1)
     s["command"] = used
-    s["started"] = _abaqus_started(run_dir, job)
+    s["started"] = started
     if launch_notes:
         s["launch_notes"] = launch_notes
     if not s["completed"]:

@@ -143,7 +143,7 @@ def stage_mesh(cfg, m, es, tag_dir, force):
             ok = False
             log(f"[{m['name']}] 메시 크기 설정(fixed_size={want_fixed})이 이전 메시와 달라 다시 메시합니다")
         want_v10 = str(cfg["hypermesh"].get("engine", "v10")).lower() == "v10"
-        if st.get("STATUS") == "OK" and ok and want_v10 and not str(st.get("ALGO", "")).startswith(("YL_V10", "GMSH")):
+        if st.get("STATUS") == "OK" and ok and want_v10 and not str(st.get("ALGO", "")).startswith(("YL_V10", "GMSH", "ROBUST")):
             ok = False
             log(f"[{m['name']}] 이전 메시는 예전 엔진({st.get('ALGO', '?')})으로 만든 것 -> YL_V10 으로 다시 메시합니다")
         want_gmsh = str(cfg["mesh"].get("mesher", "hypermesh")).lower() == "gmsh"
@@ -284,6 +284,23 @@ def stage_build(cfg, m, es, tag, tag_dir, mat, dialect):
     return info
 
 
+def input_hash(job_inp: Path) -> str:
+    """[v22] 해석 입력(Job INP + *Include 한 메시 INP)의 지문. 같으면 이전 해석 결과를 그대로 쓴다."""
+    h = hashlib.sha1()
+    try:
+        txt = job_inp.read_bytes()
+    except OSError:
+        return ""
+    h.update(txt)
+    m = re.search(rb"\*Include,\s*input=([^\r\n]+)", txt, re.I)
+    if m:
+        try:
+            h.update((job_inp.parent / m.group(1).decode(errors="ignore").strip().strip('"')).read_bytes())
+        except OSError:
+            pass
+    return h.hexdigest()[:16]
+
+
 def odb_mode(cfg, dialect) -> str:
     """single : 모델당 ODB 1개(모든 스웨징 x 방향) / separate : Job 마다 ODB 1개(예전 방식). ccx 는 separate 만."""
     mode = str(cfg.get("odb_mode", "separate")).lower()
@@ -347,7 +364,17 @@ def stage_run_combined(cfg, run_dir, info, stages, force):
     st = json.loads(st_file.read_text()) if st_file.exists() else {}
     script = HERE / "abaqus_scripts" / "extract_odb.py"
     max_jobs = int(cfg.get("abaqus", {}).get("max_continuations", len(plan0))) + 1
-    do_run = "run" in stages and (force or not st.get("all_done"))
+    fp = input_hash(run_dir / f"{cjob}.inp")
+    if st.get("input_hash"):
+        finished = bool(st.get("finished")) and st["input_hash"] == fp
+        if st.get("finished") and st["input_hash"] != fp and "run" in stages:
+            log(f"  [{tag}] 해석 입력(메시/세트/조건)이 지난번과 달라 다시 해석합니다")
+    else:   # v21 이전 결과 : 예전 규칙 (전부 완료면 재사용)
+        finished = bool(st.get("all_done"))
+    do_run = "run" in stages and (force or not finished)
+    if "run" in stages and not do_run:
+        log(f"  [{tag}] 이전 해석 결과 재사용 ({st.get('n_cases_done', '?')}/{len(plan0)} 케이스 완료, 입력 동일) "
+            f"-> 다시 돌리려면 --force")
 
     def extract_and_split(job, plan):
         csv_path = run_dir / f"{job}_RP.csv"
@@ -382,9 +409,9 @@ def stage_run_combined(cfg, run_dir, info, stages, force):
             if k == 1:
                 st = dict(jst)
             chain.append({"job": job, "plan": plan, "completed": jst.get("completed"),
-                          "elapsed_s": jst.get("elapsed_s")})
-            parts = extract_and_split(job, plan)
-            prog = runners.sta_progress(run_dir, job)
+                          "started": bool(jst.get("started", True)), "elapsed_s": jst.get("elapsed_s")})
+            parts = extract_and_split(job, plan) if jst.get("started", True) else {}
+            prog = runners.sta_progress(run_dir, job) if jst.get("started", True) else {}
             names = _step_order(plan)
             step_done = {names[i - 1] for i, v in prog.items() if i <= len(names) and v["step_time"] > 0.9999}
             for c in plan:
@@ -422,6 +449,9 @@ def stage_run_combined(cfg, run_dir, info, stages, force):
         st["chain"] = chain
         st["skipped"] = skipped
         st["all_done"] = len(done) == len(plan0)
+        # Abaqus 가 시작조차 못 한 경우(라이선스 등)는 '끝남'으로 보지 않음 -> 다음 실행에서 다시 시도
+        st["finished"] = all(l.get("started", True) for l in chain)
+        st["input_hash"] = fp
         st["elapsed_s"] = round(sum(float(l.get("elapsed_s") or 0) for l in chain), 1)
     else:
         for k, v in extract_and_split(cjob, plan0).items():
@@ -445,11 +475,18 @@ def stage_run_one(cfg, solver, run_dir, j, rp_id, stages, force):
     job = j["job"]
     st_file = run_dir / f"{job}_status.json"
     st = json.loads(st_file.read_text()) if st_file.exists() else {}
-    if "run" in stages and (force or not st.get("completed")):
+    fp = input_hash(run_dir / f"{job}.inp")
+    if st.get("input_hash"):
+        finished = st["input_hash"] == fp and (st.get("completed") or st.get("started", False))
+    else:
+        finished = bool(st.get("completed"))
+    if "run" in stages and (force or not finished):
         if solver == "abaqus":
             st = runners.run_abaqus(cfg["abaqus"], run_dir, job)
         else:
             st = runners.run_ccx(cfg.get("ccx", {}), run_dir, job)
+            st["started"] = True
+        st["input_hash"] = fp
         st_file.write_text(json.dumps(st, indent=2))
     csv_path = run_dir / f"{job}_RP.csv"
     if "extract" in stages and st.get("completed") and (force or not csv_path.exists()):
