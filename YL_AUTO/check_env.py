@@ -40,6 +40,14 @@ try:
 except Exception:
     print("  [선택] gmsh 없음 ->  pip install gmsh  (HyperMesh 메시 실패 시 자동으로 대신 메시해 줌)")
 
+try:
+    import wildmeshing  # noqa: F401
+    import OCP  # noqa: F401
+    print("  [OK] wildmeshing + cadquery-ocp (깨진 CAD 용 최후의 메셔 TetWild)")
+except Exception:
+    print("  [선택] wildmeshing / cadquery-ocp 없음 ->  pip install wildmeshing cadquery-ocp  "
+          "(HyperMesh·gmsh 가 모두 실패한 깨진 CAD 도 메시해 줌)")
+
 print("\n[HyperMesh]")
 hm_cfg = cfg.get("hypermesh", {})
 exe, how = findexe.find_hmbatch(hm_cfg)

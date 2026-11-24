@@ -130,6 +130,60 @@ def run_gmsh(g_cfg: dict, geom: Path, out_dir: Path, base: str, elem_size: float
     return st
 
 
+def robust_available() -> bool:
+    import importlib.util
+    return importlib.util.find_spec("wildmeshing") is not None and importlib.util.find_spec("OCP") is not None
+
+
+def run_robust(r_cfg: dict, geom: Path, out_dir: Path, base: str, elem_size: float) -> dict:
+    """[v21] 최후의 메셔 (OpenCASCADE 삼각형화 + TetWild). 구멍/겹침/자기관통이 있는 CAD 도 메시한다.
+    별도 프로세스로 실행 (오래 걸리거나 죽어도 파이프라인은 계속)."""
+    from core.robust_mesher import ROBUST_EXT
+    if Path(geom).suffix.lower() not in ROBUST_EXT:
+        return {"STATUS": "FAIL", "MESSAGE": f"robust 메셔는 {Path(geom).suffix} 형식을 못 읽음 (STEP/IGES 만)"}
+    if not robust_available():
+        return {"STATUS": "FAIL", "MESSAGE": "robust 메셔 패키지 없음 -> 'pip install wildmeshing cadquery-ocp' 하면 "
+                                             "HyperMesh/gmsh 가 모두 실패한 깨진 CAD 도 자동으로 메시합니다"}
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_inp = out_dir / f"{base}_hm.inp"
+    tmp_inp = out_dir / f"{base}_robust.inp"
+    if tmp_inp.exists():
+        tmp_inp.unlink()
+    script = Path(__file__).resolve().parent / "robust_mesher.py"
+    cmd = [sys.executable, str(script), str(geom), str(tmp_inp), str(elem_size),
+           str(float(r_cfg.get("envelope_mm", 0.05))), str(float(r_cfg.get("stop_energy", 20.0)))]
+    log_file = out_dir / "robust_console.log"
+    rc, dt = _run(cmd, out_dir, log_file, float(r_cfg.get("timeout_min", 90)) * 60)
+    res = {}
+    for line in _tail(log_file, 5):
+        if "ROBUST_RESULT " in line:
+            try:
+                res = json.loads(line.split("ROBUST_RESULT ", 1)[1])
+            except ValueError:
+                pass
+    n_tet = int(res.get("n_tet", 0) or 0)
+    ok = bool(res.get("ok")) and tmp_inp.exists() and n_tet >= 50
+    st = {"STATUS": "OK" if ok else "FAIL", "ALGO": "ROBUST_TETWILD", "ELEM_SIZE": elem_size, "N_TET": n_tet,
+          "N_TRIA": 0, "BAD_TRIA": 0, "INP_FILE": _p(out_inp) if ok else "", "returncode": rc,
+          "elapsed_s": round(dt, 1), "VOLUME_MM3": res.get("volume_mm3", ""), "Q_MIN": res.get("q_min", ""),
+          "FIXED_SIZE": 1 if r_cfg.get("fixed_size") else 0,
+          "MESSAGE": "" if ok else f"robust 메셔 실패 (rc={rc}): {res.get('error') or 'robust_console.log 확인'}"}
+    if ok:
+        if out_inp.exists():
+            out_inp.unlink()
+        tmp_inp.rename(out_inp)
+        status_file = out_dir / "hm_status.txt"
+        if status_file.exists():
+            keep = out_dir / "hm_status_hmfail.txt"
+            if keep.exists():
+                keep.unlink()
+            status_file.rename(keep)
+        status_file.write_text("".join(f"{k}={v}\n" for k, v in st.items()), encoding="utf-8")
+    else:
+        st["LOG_TAIL"] = _tail(log_file, 8)
+    return st
+
+
 def tet_count_ok(st: dict, min_ratio: float = 0.25, min_abs: int = 50) -> tuple[bool, str]:
     """[v8] hm_status 의 N_TET 이 표면 Tria 수에 비해 충분한지 검사.
     (예전에는 N_TET=3 이어도 STATUS=OK 로 통과해서 build 단계에서 엉뚱한 오류가 났음)"""

@@ -187,8 +187,22 @@ def stage_mesh(cfg, m, es, tag_dir, force):
                 f"qc_report.md 의 shape_q_min 으로 확인하세요.")
             return gs
         log(f"[{m['name']}] gmsh 도 실패: {gs.get('MESSAGE', '')}")
-        for l in gs.get("LOG_TAIL", []):
+        for l in gs.get("LOG_TAIL", [])[-4:]:
             log(f"[{m['name']}]   gmsh| {l}")
+    # [v21] 그래도 실패하면 최후의 메셔 (TetWild) : 구멍/겹침/자기관통이 있는 깨진 CAD 용
+    r_cfg = dict(cfg.get("robust_fallback", {}))
+    r_cfg["fixed_size"] = bool(cfg["mesh"].get("fixed_size"))
+    if st.get("STATUS") != "OK" and r_cfg.get("enabled", True):
+        log(f"[{m['name']}] 최후의 메셔(TetWild) 시도 ... (깨진 CAD 용, 몇 분~십여 분 걸림)")
+        rs = runners.run_robust(r_cfg, src, mesh_dir, m["name"], es)
+        if rs.get("STATUS") == "OK":
+            rs["HM_ERROR"] = st.get("MESSAGE", "")
+            log(f"[{m['name']}] 주의: 이 메시는 TetWild 로 만들었습니다 (Tet {rs.get('N_TET')}개, 부피 {rs.get('VOLUME_MM3')} mm3, "
+                f"{rs.get('elapsed_s')}s). CAD 에 결함이 있어 HyperMesh/gmsh 가 실패한 모델입니다.")
+            return rs
+        log(f"[{m['name']}] TetWild 도 실패: {rs.get('MESSAGE', '')}")
+        for l in rs.get("LOG_TAIL", [])[-4:]:
+            log(f"[{m['name']}]   robust| {l}")
     return st
 
 

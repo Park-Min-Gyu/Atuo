@@ -32,6 +32,13 @@
   "timeout_min": 30,
   "_comment": "HyperMesh 메시가 끝까지 실패하면 gmsh 로 대신 메시 (pip install gmsh 필요, 없으면 건너뜀). size_min_ratio: 최소 요소크기 = 요소크기 x 이 값. 쓰기 싫으면 enabled: false"
  },
+ "robust_fallback": {
+  "enabled": true,
+  "envelope_mm": 0.05,
+  "stop_energy": 20.0,
+  "timeout_min": 90,
+  "_comment": "HyperMesh(YL_V10) 와 gmsh 가 모두 실패한 깨진 CAD 용 최후의 메셔 (TetWild). pip install wildmeshing cadquery-ocp 필요, 없으면 건너뜀. envelope_mm: 결과 표면이 CAD 표면에서 벗어나도 되는 거리"
+ },
  "abaqus": {
   "cmd": "auto",
   "cpus": 4,
