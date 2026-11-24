@@ -2,7 +2,13 @@
 DFLUX 인장시편 해석 결과 한 장 정리 엑셀 자동 생성
 
 사용법
-    python excel_auto_cleaner.py [원본.xlsx] [결과.xlsx]
+    python excel_auto_cleaner.py [원본.xlsx] [결과.xlsx] [--graph]
+      --graph : '그래프' 시트(엑셀 차트 4개)도 같이 만듦  → 차트 코드는 excel_chart.py
+
+[3차 수정 내역]
+ - 통합 문서 기본 글꼴(표준 스타일)을 Calibri → 맑은 고딕 11 로 변경. 빈 셀에 새로 입력해도 맑은 고딕
+   (열 너비 단위가 '기본 글꼴 숫자 0 폭' 이라 7px → 8px 로 바뀜. 너비 값은 환산해서 화면 크기는 그대로)
+ - 원본 읽기 함수가 표 위치도 돌려주도록 정리 (차트가 같은 표를 참조할 때 사용)
 
 [2차 수정 내역]
  - 행 높이 통일: 왼쪽 표 자동 높이/제목 행 높이가 같은 행의 오른쪽 숫자표까지 늘리던 문제 해결
@@ -13,7 +19,7 @@ DFLUX 인장시편 해석 결과 한 장 정리 엑셀 자동 생성
  - 9번 온도표 3열 / 10번 응력표 4열이라 오른쪽 끝선이 안 맞던 문제 → 온도표에 ΔT(수식) 열 추가
  - x/z 표 아래 끝선을 y 표 끝선과 맞춤, 캡션 2개 같은 행에 정렬
  - 첨자 규칙: \b 가 한글 조사 앞에서 안 먹던 문제(S22가, RF2와 …) 수정, mm2/mm3 규칙 추가
- - 숫자 오른쪽 여백(들여쓰기 1), 테두리 겹침 정리, 문서 속성 작성자 'openpyxl' 제거
+ - 숫자 오른쪽 여백(표시형식 _-), 테두리 겹침 정리, 문서 속성 작성자 'openpyxl' 제거
  - 원본 읽기: 고정 셀 범위 → 'y (mm)' 같은 머리글을 찾아서 읽고, 못 찾으면 기존 고정 범위 사용
 """
 import getpass
@@ -29,8 +35,9 @@ from openpyxl.cell.text import InlineFont
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
 from openpyxl.drawing.xdr import XDRPositiveSize2D
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles import Alignment, Border, Color, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.indexed_list import IndexedList
 from openpyxl.utils.units import pixels_to_EMU
 from openpyxl.worksheet.page import PageMargins
 from openpyxl.worksheet.properties import PageSetupProperties
@@ -54,6 +61,18 @@ FILL_HEADER = PatternFill("solid", fgColor=COLOR_HEADER_BG)
 ROW_H = 19.5                   # 본문 전 구간 공통 행 높이(pt). 세 단이 같은 행을 쓰므로 반드시 통일
 AUTHOR = None                  # 문서 속성 작성자. None 이면 PC 로그인 이름 사용 (엑셀과 동일한 방식)
 PAPER = "A4"                   # 글자가 너무 작게 인쇄되면 "A3"
+DEFAULT_FONT_SIZE = 11         # 통합 문서 기본 글꼴 크기 (한글 엑셀 기본값과 동일)
+
+
+def apply_default_font(wb, name: str = FONT_NAME, size: float = DEFAULT_FONT_SIZE):
+    """
+    통합 문서 기본 글꼴(표준 스타일) 변경. 새 Workbook() 직후, 셀을 쓰기 전에 호출.
+    openpyxl 기본값은 Calibri 11 이라 빈 셀에 입력하면 Calibri 로 찍힘 → 한글 엑셀에서 만든 파일과 다르게 보임.
+    charset=129 는 한글 글꼴 표시(엑셀이 직접 저장할 때와 동일).
+    """
+    font = Font(name=name, size=size, family=2, charset=129, color=Color(theme=1))
+    wb._fonts = IndexedList([font])            # 글꼴 0번 = 서식 없는 모든 셀의 글꼴
+    wb._named_styles["Normal"].font = font     # '표준' 스타일
 
 
 # ============================================================
@@ -128,10 +147,11 @@ def build_rich_text(
 
 # ============================================================
 # 3. 엑셀 픽셀 계산 (열 너비 / 행 높이 / 글자 폭)
-#    - 열 너비 단위는 '표준 글꼴(Calibri 11)의 숫자 0 폭 = 7px' 기준
-#    - 저장값 w → 화면 px = trunc((256w + trunc(128/7)) / 256 × 7)   (100% 배율)
+#    - 열 너비 단위는 '표준 글꼴의 숫자 0 폭' 기준: 맑은 고딕 11 = 8px (Calibri 11 이면 7px)
+#      (한글 엑셀 기본 열 너비가 8.43 이 아니라 8.38(=67/8) 로 보이는 이유)
+#    - 저장값 w → 화면 px = trunc((256w + trunc(128/8)) / 256 × 8)   (100% 배율)
 # ============================================================
-MAX_DIGIT_PX = 7
+MAX_DIGIT_PX = 8
 CELL_PAD_PX = 8      # 셀 좌우 기본 여백 합
 INDENT_PX = 10       # 들여쓰기 1단계
 ROW_PX = round(ROW_H * 96 / 72)
@@ -209,7 +229,7 @@ def get_col_width(ws, col: int) -> float:
     letter = get_column_letter(col)
     if letter in ws.column_dimensions:
         return ws.column_dimensions[letter].width
-    return 8.43
+    return 9.0
 
 
 def pad_number_format(fmt: str) -> str:
@@ -444,19 +464,26 @@ def _is_num(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
-def find_axis_tables(ws) -> dict:
+def _text(v):
+    """일반 문자열 / RichText(rich_text=True 로 연 파일) 모두 문자열로. 그 외 None"""
+    return str(v) if isinstance(v, (str, CellRichText)) else None
+
+
+def find_axis_table_positions(ws) -> dict:
+    """
+    'x/y/z (mm)' 머리글로 표를 찾아 위치를 돌려줌.
+    {'temp_y': {'header_row', 'x_col', 'value_cols', 'headers', 'first_row', 'last_row'}, ...}
+    """
     found = {}
     for row in ws.iter_rows():
         for cell in row:
-            if not isinstance(cell.value, str):
-                continue
-            m = AXIS_HEADER.match(cell.value)
+            m = AXIS_HEADER.match(_text(cell.value) or "")
             if not m:
                 continue
             hdr = {}
             c = cell.column + 1
-            while isinstance(ws.cell(cell.row, c).value, str) and not AXIS_HEADER.match(ws.cell(cell.row, c).value):
-                hdr[c] = _norm_header(ws.cell(cell.row, c).value)
+            while _text(ws.cell(cell.row, c).value) and not AXIS_HEADER.match(_text(ws.cell(cell.row, c).value)):
+                hdr[c] = _norm_header(_text(ws.cell(cell.row, c).value))
                 c += 1
             stress_cols = [col for comp in ("s11", "s22", "s33") for col, h in hdr.items() if h == comp]
             time_cols = [col for col, h in hdr.items() if re.fullmatch(r"\d+(\.\d+)?s", h)]
@@ -471,12 +498,30 @@ def find_axis_tables(ws) -> dict:
             if key in found:
                 print(f"  [경고] {key} 표가 두 번 이상 있음 → {cell.coordinate} 는 무시")
                 continue
-            data, r = [], cell.row + 1
+            r = cell.row + 1
             while _is_num(ws.cell(r, cell.column).value):
-                data.append([ws.cell(r, cell.column).value] + [ws.cell(r, cc).value for cc in cols])
                 r += 1
-            found[key] = data
+            if r == cell.row + 1:
+                continue
+            found[key] = {
+                "header_row": cell.row,
+                "x_col": cell.column,
+                "value_cols": cols,
+                "headers": [_text(ws.cell(cell.row, cc).value) for cc in cols],
+                "first_row": cell.row + 1,
+                "last_row": r - 1,
+            }
     return found
+
+
+def find_axis_tables(ws) -> dict:
+    data = {}
+    for key, p in find_axis_table_positions(ws).items():
+        data[key] = [
+            [ws.cell(r, p["x_col"]).value] + [ws.cell(r, cc).value for cc in p["value_cols"]]
+            for r in range(p["first_row"], p["last_row"] + 1)
+        ]
+    return data
 
 
 def read_source_data(src_path: str) -> dict:
@@ -612,27 +657,30 @@ def write_axis_tables(ws, top_row, c_left, c_right, title, tables, headers, widt
     return write_note(ws, block_end + 1, c_left, c_last, note)
 
 
-def build_report(data: dict, dst_path: str):
+def build_report(data: dict, dst_path: str, with_graph: bool = False):
     wb = openpyxl.Workbook()
+    apply_default_font(wb)
     ws = wb.active
     ws.title = "해석 정리"
     ws.sheet_view.showGridLines = False
     ws.sheet_view.zoomScale = 85
+    ws.sheet_format.defaultRowHeight = 16.5      # 맑은 고딕 11 기본 행 높이
 
     # --- 열 배치: A(여백) | B~D 왼쪽 표 | E | F~M 그림 | N | O~R 표 | S | T~W 표 ---
+    #     (맑은 고딕 기준 너비. 괄호 안은 px — Calibri 시절 2차 수정본과 같은 크기)
     COL_L = 2
-    LEFT_W = [14.0, 32.0, 29.0]
+    LEFT_W = [12.25, 28.0, 25.5]         # 98 / 224 / 204 px (글자가 길면 자동으로 넓어짐)
     COL_M = COL_L + len(LEFT_W) + 1
-    MID_N, MID_W = 8, 11.5
+    MID_N, MID_W = 8, 10.0               # 80 px × 4열 = 그림 한 칸 320 px
     COL_R = COL_M + MID_N + 1
-    RIGHT_W = [9.0, 8.5, 8.5, 8.5]
+    RIGHT_W = [8.0, 7.5, 7.5, 7.5]       # 64 / 60 px
     COL_R2 = COL_R + len(RIGHT_W) + 1
     COL_LAST = COL_R2 + len(RIGHT_W) - 1
 
-    set_col_width(ws, 1, 2.0)
-    set_col_width(ws, COL_M - 1, 3.0)
-    set_col_width(ws, COL_R - 1, 3.0)
-    set_col_width(ws, COL_R2 - 1, 2.0)
+    set_col_width(ws, 1, 1.75)
+    set_col_width(ws, COL_M - 1, 2.75)
+    set_col_width(ws, COL_R - 1, 2.75)
+    set_col_width(ws, COL_R2 - 1, 1.75)
     for c in range(COL_M, COL_M + MID_N):
         set_col_width(ws, c, MID_W)
 
@@ -685,7 +733,8 @@ def build_report(data: dict, dst_path: str):
     grip = min(row[1] for row in temp["y"])
     temp_note = (
         f"Y(길이) 방향 온도 구배가 지배적(중앙 약 {peak:.0f} ℃, 그립부 {grip:.0f} ℃)이며 "
-        f"X(폭)·Z(두께) 방향은 거의 균일함. ΔT = T(30 s) − T(10 s)."
+        f"X(폭)·Z(두께) 방향은 거의 균일함. "
+        + "ΔT = T(30 s) − T(10 s).".replace(" ", NBSP)          # 식 중간에서 줄이 안 끊기게
     )
     r = write_axis_tables(ws, 4, COL_R, COL_R2, "9. 온도 분포 (℃) - 시편 중앙 X/Y/Z 방향",
                           temp, ["", "10 s", "30 s", "ΔT"], RIGHT_W, temp_note)
@@ -724,17 +773,22 @@ def build_report(data: dict, dst_path: str):
     wb.properties.lastModifiedBy = author
     wb.properties.title = "인장시편 DFLUX 해석 정리"
 
+    if with_graph:
+        from excel_chart import add_chart_sheet      # 필요할 때만 불러옴
+        add_chart_sheet(wb, ws)
+
     wb.save(dst_path)
     print(f"정리 완료: {dst_path}")
 
 
-def clean_dflux_workbook(src_path: str, dst_path: str):
+def clean_dflux_workbook(src_path: str, dst_path: str, with_graph: bool = False):
     print(f"원본 읽는 중: {src_path}")
     data = read_source_data(src_path)
-    build_report(data, dst_path)
+    build_report(data, dst_path, with_graph=with_graph)
 
 
 if __name__ == "__main__":
-    src = sys.argv[1] if len(sys.argv) > 1 else "인장시편_DFLUX_해석정리_한페이지 (1).xlsx"
-    dst = sys.argv[2] if len(sys.argv) > 2 else "인장시편_DFLUX_해석정리_수정본.xlsx"
-    clean_dflux_workbook(src, dst)
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    src = args[0] if len(args) > 0 else "인장시편_DFLUX_해석정리_한페이지 (1).xlsx"
+    dst = args[1] if len(args) > 1 else "인장시편_DFLUX_해석정리_수정본.xlsx"
+    clean_dflux_workbook(src, dst, with_graph="--graph" in sys.argv)
