@@ -177,33 +177,53 @@ def _tet_vol(x, c):
     return np.einsum("ij,ij->i", b - a, np.cross(cc - a, d - a)) / 6.0
 
 
-def fix_tet10_midside_order(m: Mesh) -> None:
-    """중간절점(5~10)이 Abaqus 규칙의 모서리 중점에 있는지 확인하고, 다른 규칙이면 재배열."""
+def fix_tet10_midside_order(m: Mesh, max_dev: float = 0.2) -> None:
+    """중간절점(5~10) 순서를 Abaqus 규칙에 맞추고, 너무 휜 중간절점은 모서리 중점으로 돌린다.
+
+    [v23] HyperMesh(YL_V10) 는 2차 요소로 바꿀 때 중간절점을 CAD 곡면 위로 옮긴다(*orderchangetosecond 1 1).
+      작은 필렛에서는 중간절점이 모서리 중점에서 크게 벗어나서, 예전 코드는 '가장 가까운 중점' 으로
+      순서를 추정하다가 판단이 안 되면 오류로 멈췄다 (요소 25337, 24767 ...).
+      - 순서 : 파일 전체에서 가장 많이 쓰인 순서(보통 Abaqus 순서)를 판단이 안 되는 요소에도 쓴다
+      - 휨   : 중간절점이 모서리 중점에서 모서리 길이의 max_dev(기본 20 %) 넘게 벗어나면 중점으로 옮긴다
+               (그대로 두면 Abaqus 에서 요소가 뒤집히거나 찌그러짐 경고/발산의 원인이 된다)"""
     if m.family != "tet10":
         return
     x, c = m.xyz, m.conn
     corners = c[:, :4]
-    mids = c[:, 4:]
-    # 각 중간절점이 어느 코너쌍의 중점에 가장 가까운지 찾는다
+    mids = c[:, 4:].copy()
     pairs = [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)]
-    pm = np.stack([(x[corners[:, i]] + x[corners[:, j]]) / 2 for i, j in pairs], axis=1)  # (E,6,3)
-    mx = x[mids]                                                                         # (E,6,3)
-    d = np.linalg.norm(mx[:, :, None, :] - pm[:, None, :, :], axis=3)                   # (E,6,6)
-    which = d.argmin(axis=2)                                                             # mid k -> pair index
-    ok = np.all(which == np.arange(6), axis=1)
-    if ok.all():
-        m.note("tet10 midside order: Abaqus 규칙 일치")
-        return
-    nfix = 0
-    for e in np.where(~ok)[0]:
-        w = which[e]
-        if len(set(w.tolist())) != 6:
-            raise ValueError(f"요소 {m.elem_ids[e]}: 중간절점이 모서리 중점과 맞지 않습니다(곡면 투영이 매우 큼).")
-        newmid = np.empty(6, dtype=np.int64)
-        newmid[w] = mids[e]
-        c[e, 4:] = newmid
-        nfix += 1
-    m.note(f"tet10 midside order: {nfix}개 요소 재배열")
+    pm = np.stack([(x[corners[:, i]] + x[corners[:, j]]) / 2 for i, j in pairs], axis=1)   # (E,6,3)
+    mx = x[mids]                                                                          # (E,6,3)
+    d = np.linalg.norm(mx[:, :, None, :] - pm[:, None, :, :], axis=3)                    # (E,6,6)
+    which = d.argmin(axis=2)                                                              # 중간절점 k -> 모서리
+    valid = np.array([len(set(w.tolist())) == 6 for w in which])
+    # 파일 전체에서 가장 많이 나온 순서 (판단이 확실한 요소들 기준)
+    keys, counts = np.unique(which[valid], axis=0, return_counts=True) if valid.any() else (np.zeros((0, 6), int), [])
+    common = keys[int(np.argmax(counts))] if len(keys) else np.arange(6)
+    perm = np.where(valid[:, None], which, common[None, :])
+    n_reorder = int((~np.all(perm == np.arange(6), axis=1)).sum())
+    n_ambig = int((~valid).sum())
+    if n_reorder:
+        newmid = np.empty_like(mids)
+        np.put_along_axis(newmid, perm, mids, axis=1)
+        c[:, 4:] = newmid
+    # 너무 휜 중간절점 -> 모서리 중점
+    L = np.stack([np.linalg.norm(x[corners[:, i]] - x[corners[:, j]], axis=1) for i, j in pairs], axis=1)
+    mid_now = c[:, 4:]
+    dev = np.linalg.norm(x[mid_now] - pm, axis=2) / np.maximum(L, 1e-12)
+    bad = dev > max_dev
+    n_straight = 0
+    if bad.any():
+        e_idx, k_idx = np.nonzero(bad)
+        nodes = mid_now[e_idx, k_idx]
+        x[nodes] = pm[e_idx, k_idx]
+        n_straight = int(len(np.unique(nodes)))
+    msg = f"tet10 midside order: {'Abaqus 규칙 일치' if not n_reorder else f'{n_reorder}개 요소 재배열'}"
+    if n_ambig:
+        msg += f" (곡면 투영이 커서 순서 판단이 안 된 요소 {n_ambig}개는 파일 전체 순서를 적용)"
+    if n_straight:
+        msg += f", 모서리 길이의 {int(max_dev * 100)}% 넘게 휜 중간절점 {n_straight}개를 모서리 중점으로 옮김 (최대 {dev.max():.2f})"
+    m.note(msg)
 
 
 def fix_orientation(m: Mesh) -> None:
