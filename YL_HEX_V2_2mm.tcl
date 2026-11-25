@@ -6,6 +6,8 @@
 #   - Modular tunable functions for direct user editing
 #   - Narrow CAD face defeature before SolidMap (removes thin hex layers / aspect 100+)
 #   - Reports the ACTUAL hex edge length so the 2.0 mm size can be verified
+#   - Surfaces-only import (0 solids): cleans the shell and builds the solid
+#     automatically, so the HEXA engine runs instead of the 2D skin fallback
 #
 #   Run inside HyperMesh 2019:
 #     File -> Run -> Tcl/Tk Script -> Select YL_HEX_V2_2mm.tcl
@@ -26,7 +28,7 @@ proc ylh_default_params {} {
         feature_angle  20.0    \
         min_len_factor 0.20    \
         max_len_factor 1.60    \
-        fillet_rows    "dense" \
+        fillet_rows    "standard" \
         min_jac        0.50    \
         max_warp       15.0    \
         aspect         5.0     \
@@ -595,7 +597,7 @@ proc ylh_fmt {d key fmt} {
 
 # --- [TUNABLE FUNCTION 4] BatchMesher Criteria & Param Writer ---
 # Edit fillet_rows, feature_angle, min_len_factor, tria penalty here!
-proc ylh2_write_quad_bm_files {dir stem s feature_angle min_f max_f quad_mode fillet_rows min_jac max_warp max_skew max_asp} {
+proc ylh2_write_quad_bm_files {dir stem s feature_angle min_f max_f quad_mode fillet_rows min_jac max_warp max_skew max_asp {narrow_w -1.0}} {
     set cr [file join $dir "${stem}.criteria"]
     set pr [file join $dir "${stem}.param"]
     # element_type: 1 = quads only, 2 = mixed (quad-dominant)
@@ -669,7 +671,7 @@ edges_stitch_flags                0
 max_edges_stitch_tol              -1.0
 fix_overlapsurfs_flag             1
 overlapsurfs_maxtangangle         -1.0
-narrow_surfs_merge_width          -1.0
+narrow_surfs_merge_width          [format %.4g $narrow_w]
 narrow_surfs_treat_flags          3
 appl_tria_reduction               1
 tria_redu_max_elemsize            auto
@@ -742,6 +744,7 @@ proc ylh2_run {cfg_dict} {
     set SAVE_HM        [dict get $cfg_dict save_hm]
     set OUT_DIR        [dict get $cfg_dict out_dir]
     set OUT_NAME       [dict get $cfg_dict out_name]
+    set NARROW_W       [expr {[dict exists $cfg_dict defeature_width] ? double([dict get $cfg_dict defeature_width]) : 0.5 * $ELEM_SIZE}]
 
     *clearmark surfs 1
     if {$SELECT_MODE eq "pick"} {
@@ -764,7 +767,7 @@ proc ylh2_run {cfg_dict} {
 
     set work_dir [ylh_ascii_temp_dir]
     set tmp_stem "_ylh2_[pid]"
-    lassign [ylh2_write_quad_bm_files $work_dir $tmp_stem $ELEM_SIZE $FEATURE_ANGLE $MIN_LEN_FACTOR $MAX_LEN_FACTOR $QUAD_MODE $FILLET_ROWS $MIN_JACOBIAN $MAX_WARPAGE $MAX_SKEW $TARGET_ASPECT] bm_cr bm_pr
+    lassign [ylh2_write_quad_bm_files $work_dir $tmp_stem $ELEM_SIZE $FEATURE_ANGLE $MIN_LEN_FACTOR $MAX_LEN_FACTOR $QUAD_MODE $FILLET_ROWS $MIN_JACOBIAN $MAX_WARPAGE $MAX_SKEW $TARGET_ASPECT $NARROW_W] bm_cr bm_pr
 
     *clearmark lines 1; *createmark lines 1 "all"
     catch { *maskmark lines 1 }
@@ -837,7 +840,7 @@ proc ylh2_run {cfg_dict} {
 
     set pass_2d [expr {$bm_err eq "" && $write_err eq "" && $n_quad > 0 && $n_unmeshed == 0 && $bad_jac == 0 && $bad_warp == 0 && $bad_asp == 0 && $bad_skew == 0 ? 1 : 0}]
     set status [expr {$pass_2d ? "OK" : "FAIL"}]
-    set msg [format "YL_H2 (2D Quad-Priority Skin, Fixed 2.0mm) Finished\n\n- Status: %s\n- Size: %.2f mm (FIXED), Mode: %s, FeatureAngle: %.1f deg, FilletRows: %s\n- Elements: Quad4=%d, Tria3=%d (Tria ratio: %.2f%%)\n- Hole Patching: %d surface(s) patched, %d still unmeshed\n- 2D CAD-Snapped Smoothing: %d nodes moved\n- Quality (HM):\n    Bad Jacobian (<%.2f) : %d\n    Bad Warpage  (>%.1f) : %d\n    Bad Aspect   (>%.1f) : %d\n    Bad Skew     (>%.1f) : %d\n- Saved HM: %s" \
+    set msg [format "*** 2D SHELL SKIN (quad4/tria3) - THIS IS NOT A HEXA MESH ***\n(check it with 'check elems > 2-d'; hexa needs a solid)\n\nYL_H2 (2D Quad-Priority Skin, Fixed 2.0mm) Finished\n\n- Status: %s\n- Size: %.2f mm (FIXED), Mode: %s, FeatureAngle: %.1f deg, FilletRows: %s\n- Elements: Quad4=%d, Tria3=%d (Tria ratio: %.2f%%)\n- Hole Patching: %d surface(s) patched, %d still unmeshed\n- 2D CAD-Snapped Smoothing: %d nodes moved\n- Quality (HM):\n    Bad Jacobian (<%.2f) : %d\n    Bad Warpage  (>%.1f) : %d\n    Bad Aspect   (>%.1f) : %d\n    Bad Skew     (>%.1f) : %d\n- Saved HM: %s" \
         $status $ELEM_SIZE $QUAD_MODE $FEATURE_ANGLE $FILLET_ROWS \
         $n_quad $n_tria $tria_pct $n_patched $n_unmeshed $n_smoothed_2d \
         $MIN_JACOBIAN $bad_jac $MAX_WARPAGE $bad_warp $TARGET_ASPECT $bad_asp $MAX_SKEW $bad_skew $saved_txt]
@@ -873,6 +876,35 @@ proc ylh1_run_solidmap {solid_ids elem_size quad_mode custom_flags} {
     }
     *clearmark solids 1
     return $sm_err
+}
+
+# --- [TUNABLE FUNCTION 8] Build the solid when the import gave surfaces only ---
+#   CATIA STEP solids can import into HyperMesh 2019 as surfaces only (0 solids) when
+#   sliver faces / zero-length edges keep the shell from closing (POR model: faces down
+#   to 0.001 mm wide). 1) BatchMesher geometry cleanup (narrow faces merged),
+#   2) solid from the bounding surfaces (= Geometry > solids > bounding surfs > create).
+#   Returns {n_solids text defeature_done}.
+proc ylh1_make_solid {elem_size do_defeature width} {
+    set notes {}; set df_done 0
+    if {$do_defeature} {
+        lassign [ylh1_defeature $elem_size $width] df_ok df_txt
+        lappend notes "cleanup: $df_txt"; set df_done 1
+    }
+    *clearmark surfs 1; *createmark surfs 1 "all"
+    set err ""
+    if {[catch { *solids_create_from_surfaces 1 0 } e]} { set err $e }
+    *clearmark surfs 1
+    *clearmark solids 1; *createmark solids 1 "all"
+    set n [llength [hm_getmark solids 1]]
+    *clearmark solids 1
+    if {$n > 0} {
+        lappend notes "OK - $n solid(s) built from the surfaces"
+    } elseif {$err ne ""} {
+        lappend notes "bounding-surfs command failed: $err"
+    } else {
+        lappend notes "surfaces are not closed (free edges remain)"
+    }
+    return [list $n [join $notes "\n  "] $df_done]
 }
 
 # --- [TUNABLE FUNCTION 7] Narrow CAD face defeature before SolidMap ---
@@ -958,13 +990,23 @@ proc ylh1_run {cfg_dict} {
     *clearmark solids 1
     set n_solids [llength $solid_ids]
 
+    set solid_txt "from import"
+    set df_done 0
+    if {$n_solids == 0 && $SELECT_MODE eq "all"} {
+        lassign [ylh1_make_solid $ELEM_SIZE $DEFEATURE $DEFEATURE_WIDTH] n_solids solid_txt df_done
+        *clearmark solids 1; *createmark solids 1 "all"
+        set solid_ids [hm_getmark solids 1]
+        *clearmark solids 1
+        set n_solids [llength $solid_ids]
+    }
     if {$n_solids == 0} {
+        set msg0 "NO SOLID in the model (surfaces only) - HEXA needs one closed solid.\n\nAuto solid build:\n  $solid_txt\n\nManual fix in HyperMesh:\n  1) Geometry > autocleanup (or edge edit > equivalence, tol 0.05) until no red free edges\n  2) Geometry > solids > bounding surfs > surfs: all > create\n  3) run this script again"
         if {$QUAD_FALLBACK} {
-            set ans [tk_messageBox -type yesno -icon warning -title "YL HEX V2 (2mm)" \
-                -message "No solids found/selected.\nRun H2 (2D Quad Skin, 2.0mm) on surfaces instead?"]
+            set ans [tk_messageBox -type yesno -default no -icon warning -title "YL HEX V2 - NO SOLID" \
+                -message "$msg0\n\nYES = make a 2D SHELL skin (quad4/tria3) instead - NOT a hexa mesh\nNO  = stop (recommended)"]
             if {$ans eq "yes"} { return [ylh2_run $cfg_dict] }
         }
-        return [dict create status FAIL msg "No solids found/selected. Solid geometry is required for Multi-Solid Map Hexa."]
+        return [dict create status FAIL msg $msg0]
     }
 
     if {$SELECT_MODE eq "all"} {
@@ -974,7 +1016,9 @@ proc ylh1_run {cfg_dict} {
 
     # 1b. Narrow CAD face defeature (thin hex layers / aspect 100+ / tria-penta tips)
     set df_txt "off"
-    if {$DEFEATURE && $SELECT_MODE ne "all"} {
+    if {$df_done} {
+        set df_txt "done while building the solid"
+    } elseif {$DEFEATURE && $SELECT_MODE ne "all"} {
         set df_txt "skipped (pick mode: only runs on 'All Solids / Surfaces')"
     } elseif {$DEFEATURE} {
         lassign [ylh1_defeature $ELEM_SIZE $DEFEATURE_WIDTH] df_ok df_txt
@@ -1182,9 +1226,9 @@ proc ylh1_run {cfg_dict} {
 
     set status [expr {[llength $_why] == 0 ? "OK" : "FAIL"}]
     set unmap_txt [expr {$unmap_check_ok ? ($n_unmap > 0 ? [join [lrange $unmap_ids 0 9] ","] : "none") : "indeterminate"}]
-    set msg [format "YL_H1 (Multi-Solid Map Hexa, Fixed 2.0mm) Finished\n\n- Status: %s\n- Size: %.2f mm (FIXED), Type: %s (actual: %s)\n- QuadMode: %s, Equivalence: %s\n- Defeature: %s\n- Solids: %d (Unmappable: %d -> %s)\n- Elements: Hex=%d, Penta=%d (Wedge ratio: %.2f%%)\n- Actual size: hex edge median %s mm (p5 %s / p95 %s), target %.1f mm\n- Sliver hexes (shortest edge < %.2f mm): %d\n- 3D Interior Smoothing: %d nodes moved\n- Quality (HM):\n    Bad Jacobian (<%.2f) : %d\n    Bad Warpage  (>%.1f) : %d\n    Bad Aspect   (>%.1f) : %d\n    Bad Skew     (>%.1f) : %d\n- Stats (Scaled Jacobian):\n    NegJac=%d, SJ min=%s, SJ mean=%s, Warp max=%s, Asp p95=%s\n- Saved HM: %s\n- Exported INP: %s" \
+    set msg [format "YL_H1 (Multi-Solid Map Hexa, Fixed 2.0mm) Finished\n\n- Status: %s\n- Size: %.2f mm (FIXED), Type: %s (actual: %s)\n- QuadMode: %s, Equivalence: %s\n- Solid: %s\n- Defeature: %s\n- Solids: %d (Unmappable: %d -> %s)\n- Elements: Hex=%d, Penta=%d (Wedge ratio: %.2f%%)\n- Actual size: hex edge median %s mm (p5 %s / p95 %s), target %.1f mm\n- Sliver hexes (shortest edge < %.2f mm): %d\n- 3D Interior Smoothing: %d nodes moved\n- Quality (HM):\n    Bad Jacobian (<%.2f) : %d\n    Bad Warpage  (>%.1f) : %d\n    Bad Aspect   (>%.1f) : %d\n    Bad Skew     (>%.1f) : %d\n- Stats (Scaled Jacobian):\n    NegJac=%d, SJ min=%s, SJ mean=%s, Warp max=%s, Asp p95=%s\n- Saved HM: %s\n- Exported INP: %s" \
         $status $ELEM_SIZE $ABAQUS_ELEM_TYPE $assigned_hex_type \
-        $QUAD_MODE $equiv_mode $df_txt $n_solids $n_unmap $unmap_txt \
+        $QUAD_MODE $equiv_mode $solid_txt $df_txt $n_solids $n_unmap $unmap_txt \
         $n_hex $n_penta $penta_pct $size_med $size_p05 $size_p95 $ELEM_SIZE $sliver_len $n_sliver $n_smoothed \
         $MIN_JACOBIAN $bad_jac $MAX_WARPAGE $bad_warp $TARGET_ASPECT $bad_asp $MAX_SKEW $bad_skew \
         $neg_jac $jac_min $jac_mean $warp_max $asp_p95 $saved_hm $saved_inp]
@@ -1334,6 +1378,9 @@ proc ylh_launch_gui {} {
         set res [ylh2_run $cfg_dict]
     }
 
+    if {$::ylh_cfg(mode) eq "hex" && [string match "YL_H1*" [dict get $res msg]]} {
+        dict append res msg "\n\n(Check this HEXA mesh with 'check elems > 3-d', not 2-d)"
+    }
     set icon [expr {[dict get $res status] eq "OK" ? "info" : "warning"}]
     tk_messageBox -icon $icon -title "YL HEX V2 Result ([dict get $res status])" -message [dict get $res msg]
 }
