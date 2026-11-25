@@ -1,4 +1,4 @@
-# =====================================================================
+﻿# =====================================================================
 # YL_HEX_V1.ps1 : YL 자동 핵사(Hexa) 메쉬 (3D Multi-Solid Map + 2D Quad 스킨)
 #   실행 : 같은 폴더의 YL_HEX_V1.bat 더블클릭 -> 설정 창 -> 모델 선택 -> [실행]
 #   필요한 것 : HyperMesh 2019 (hmbatch.exe) + 라이선스
@@ -14,16 +14,28 @@
 #   설정은 %LOCALAPPDATA%\YL_HEX_V1\YL_settings.json 에 저장됩니다.
 #   hmbatch 경로 지정 : set YL_HMBATCH=<hmbatch.exe 경로>
 #   SolidMap 플래그 지정(필요 시) : set YL_SOLIDMAP_FLAGS=131074
+#   부품(컴포넌트) 간 절점까지 전부 병합(예전 동작) : set YL_EQUIV_GLOBAL=1
 #   창 없이 실행 : set YL_JOB_FILE=<job 파일> (선택: set YL_OUT=<출력 폴더>)
+#
+#   ※ 이 파일은 반드시 "UTF-8 (BOM 포함)" 으로 저장하세요.
+#     Windows PowerShell 5.1 은 BOM 없는 파일을 ANSI(CP949)로 읽어 한글이 깨집니다.
 # =====================================================================
 $ErrorActionPreference = 'Continue'
 $here  = $PSScriptRoot
 $inv   = [Globalization.CultureInfo]::InvariantCulture
 $utf8  = New-Object Text.UTF8Encoding $false
 
+function Test-YLAscii([string]$s) { return ($s -notmatch '[^\x00-\x7F]') }
+
 # ---------------- engine files ($YLEngineFiles, end of this file) -> temp folder ----------------
 function Expand-YLEngine {
-    $dir = Join-Path $env:TEMP 'YL_HEX_V1_engine'
+    # HyperMesh 2019 는 한글 등 비ASCII 경로의 Tcl 스크립트를 못 여는 경우가 있음
+    # (Windows 사용자명이 한글이면 %TEMP% 경로에 한글이 들어감) -> ASCII 경로로 대체
+    $base = $env:TEMP
+    if (-not (Test-YLAscii $base)) {
+        $base = if ($env:PUBLIC -and (Test-YLAscii $env:PUBLIC)) { $env:PUBLIC } else { $env:SystemDrive + '\' }
+    }
+    $dir = Join-Path $base 'YL_HEX_V1_engine'
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     foreach ($name in $script:YLEngineFiles.Keys) {
         [IO.File]::WriteAllText((Join-Path $dir $name), $script:YLEngineFiles[$name], $utf8)
@@ -69,6 +81,11 @@ function Invoke-YLBatch {
     $InpDir = Join-Path $OutDir 'inp'
     New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
+    $nonAscii = @(@($all) + @($OutDir) | Where-Object { -not (Test-YLAscii $_) })
+    if ($nonAscii.Count -gt 0) {
+        Write-Warning ("경로에 한글 등 비ASCII 문자가 있습니다. HyperMesh 2019 는 이런 경로에서 import/저장이 실패할 수 있습니다:`n  " + (($nonAscii | Select-Object -First 5) -join "`n  "))
+    }
+
     $runLines = @($jobLines)
     $env:YL_EXPORT_INP    = "$ExportInp"
     $env:YL_OUT_DIR       = $OutDir
@@ -85,55 +102,110 @@ function Invoke-YLBatch {
 
     $log = Join-Path $LogDir 'batch_log.txt'
     $csv = Join-Path $LogDir 'batch_summary.csv'
+    # run_batch.tcl 의 CSV 헤더와 동일해야 함
+    $csvCols = @('model','status','engine','mesher','elem_size','elem_type','solids','unmap_solids','surfs',
+                 'n_hex','n_penta','n_quad','n_tria','bad_jac','bad_warp','bad_asp','bad_skew','neg_jac',
+                 'jac_min','jac_mean','warp_max','asp_p95','smoothed_nodes','pass_hex','fallback_h2',
+                 'seconds','output','inp','note')
+    $script:YLLogText = ''
 
+    # hmbatch 미실행 / 크래시 모델용 FAIL 행
+    function New-YLFailRow([string]$line, [string]$engine, [string]$note) {
+        $o = [ordered]@{}
+        foreach ($c in $csvCols) { $o[$c] = '' }
+        $o['model']       = [IO.Path]::GetFileNameWithoutExtension((($line -split "`t")[0]).Trim().Trim('"'))
+        $o['status']      = 'FAIL'
+        $o['engine']      = $engine
+        $o['pass_hex']    = '0'
+        $o['fallback_h2'] = '0'
+        $o['note']        = $note
+        return [pscustomobject]$o
+    }
+
+    # hmbatch 실행. 모델 처리 중 hmbatch 가 죽으면 그 모델만 FAIL 로 기록하고 남은 모델로 새 hmbatch 를 다시 띄움.
+    # 반환값은 항상 job 줄과 1:1, 같은 순서 (CSV 는 모델마다 순서대로 flush 되므로 줄 수 = 완료된 모델 수)
     function Invoke-HmBatchRun([string[]]$lines, [string]$engineVersion, [string]$consoleName) {
-        $listFile = Join-Path $LogDir '_models.txt'
-        [IO.File]::WriteAllLines($listFile, [string[]]@($lines | ForEach-Object { ($_ -split "`t")[0] }), $utf8)
-        $env:YL_LIST = $listFile
-        $jobRun = Join-Path $LogDir '_job_run.txt'
-        [IO.File]::WriteAllLines($jobRun, [string[]]$lines, $utf8)
-        $env:YL_JOB = $jobRun
-        $env:YL_VERSION = $engineVersion
-        Push-Location $LogDir
-        try {
-            & $HmBatch -tcl (Join-Path $tclDir 'run_batch.tcl') | Out-File -FilePath (Join-Path $LogDir $consoleName) -Encoding utf8
-        } finally {
-            Pop-Location
+        $acc = @()
+        $pending = @($lines)
+        $attempt = 0
+        while ($pending.Count -gt 0) {
+            $attempt++
+            # [수정] 이전 실행의 CSV/로그가 남아 있으면 hmbatch 가 시작조차 못 해도 옛 결과를 읽어버렸음
+            Remove-Item -LiteralPath $csv, $log -Force -ErrorAction SilentlyContinue
+            $listFile = Join-Path $LogDir '_models.txt'
+            [IO.File]::WriteAllLines($listFile, [string[]]@($pending | ForEach-Object { ($_ -split "`t")[0] }), $utf8)
+            $env:YL_LIST = $listFile
+            $jobRun = Join-Path $LogDir '_job_run.txt'
+            [IO.File]::WriteAllLines($jobRun, [string[]]$pending, $utf8)
+            $env:YL_JOB = $jobRun
+            $env:YL_VERSION = $engineVersion
+            $console = if ($attempt -eq 1) { $consoleName } else { [IO.Path]::GetFileNameWithoutExtension($consoleName) + "_retry$attempt.txt" }
+            Push-Location $LogDir
+            try {
+                & $HmBatch -tcl (Join-Path $tclDir 'run_batch.tcl') | Out-File -FilePath (Join-Path $LogDir $console) -Encoding utf8
+            } finally {
+                Pop-Location
+            }
+            $started = Test-Path -LiteralPath $log     # run_batch.tcl 은 시작하자마자 batch_log.txt 를 만듦
+            if ($started) {
+                if ($script:YLLogText) { $script:YLLogText += "`r`n" }
+                $script:YLLogText += [IO.File]::ReadAllText($log, [Text.Encoding]::UTF8)
+            }
+            $got = @()
+            if (Test-Path -LiteralPath $csv) { $got = @(Import-Csv -LiteralPath $csv -Encoding UTF8) }
+            $acc += $got
+            if ($got.Count -ge $pending.Count) { break }
+
+            $rest = @($pending | Select-Object -Skip $got.Count)
+            if (-not $started) {
+                # Tcl 이 아예 시작되지 않음 = 라이선스/설치 문제 -> 재시도해도 같으므로 중단
+                Write-Warning "hmbatch 가 시작되지 않았습니다 (라이선스/설치 확인: _logs\$console)"
+                foreach ($ln in $rest) { $acc += New-YLFailRow $ln $engineVersion "hmbatch 미실행 (라이선스/설치 확인: _logs\$console)" }
+                break
+            }
+            $crashedName = ($rest[0] -split "`t")[0]
+            Write-Warning "hmbatch 가 모델 처리 중 비정상 종료: $crashedName -> 이 모델은 FAIL 처리, 남은 $($rest.Count - 1)개로 다시 실행"
+            $script:YLLogText += "`r`n*** hmbatch 비정상 종료 : $crashedName (_logs\$console)`r`n"
+            $acc += New-YLFailRow $rest[0] $engineVersion 'hmbatch 비정상 종료 (이 모델 처리 중 크래시/강제종료)'
+            $pending = @($rest | Select-Object -Skip 1)
         }
-        if (Test-Path -LiteralPath $csv) { return @(Import-Csv -LiteralPath $csv -Encoding UTF8) }
-        return @()
+        return $acc
     }
 
     $primaryEngine = if ($DoHex -eq 1) { 'H1' } else { 'H2' }
     $rows = @(Invoke-HmBatchRun $runLines $primaryEngine 'hmbatch_console.txt')
-    $logText = ''
-    if (Test-Path -LiteralPath $log) { $logText = [IO.File]::ReadAllText($log, [Text.Encoding]::UTF8) }
 
     # 3D SolidMap 실패(Unmappable 등) 모델 -> 옵션 켜져 있으면 새 hmbatch 세션에서 H2(2D Quad 스킨)로 대체 저장
+    $nFallback = 0
     if ($DoHex -eq 1 -and $QuadFallback -eq 1) {
-        $fallbackRows = @($rows | Where-Object { $_.PSObject.Properties['fallback_h2'] -and "$($_.fallback_h2)".Trim() -eq '1' })
-        if ($fallbackRows.Count -gt 0) {
-            $names = @($fallbackRows | ForEach-Object { $_.model })
-            $fbLines = @($runLines | Where-Object { $names -contains [IO.Path]::GetFileNameWithoutExtension((($_ -split "`t")[0]).Trim().Trim('"')) })
+        $fbIdx = @(for ($i = 0; $i -lt $rows.Count; $i++) { if ("$($rows[$i].fallback_h2)".Trim() -eq '1') { $i } })
+        if ($fbIdx.Count -gt 0) {
+            # [수정] 결과 행은 job 줄과 같은 순서 -> 파일명이 아니라 순번으로 매칭 (다른 폴더의 같은 파일명 충돌 방지)
+            $fbLines = @(foreach ($i in $fbIdx) {
+                $f = @($runLines[$i] -split "`t")
+                # H1 결과(.hm)를 덮어쓰지 않도록 대체 결과는 이름 뒤에 _2DQuad
+                if ($f.Count -ge 2 -and $f[1].Trim()) { $f[1] = $f[1].Trim() + '_2DQuad' }
+                $f -join "`t"
+            })
+            $names = @($fbIdx | ForEach-Object { $rows[$_].model })
             Write-Host "H2 (2D Quad 준비용) 대체 엔진 : $($fbLines.Count)개 모델 - $($names -join ', ')" -ForegroundColor Yellow
-            $header = $null
-            if (Test-Path -LiteralPath $csv) { $header = ([IO.File]::ReadAllLines($csv, [Text.Encoding]::UTF8)[0]).TrimStart([char]0xFEFF) }
+            $script:YLLogText += "`r`n=== H2 fallback (2D Quad skin, new hmbatch process) ===`r`n"
             $h2Rows = @(Invoke-HmBatchRun $fbLines 'H2' 'hmbatch_console_h2.txt')
-            if (Test-Path -LiteralPath $log) { $logText += "`r`n=== H2 fallback (2D Quad skin, new hmbatch process) ===`r`n" + [IO.File]::ReadAllText($log, [Text.Encoding]::UTF8) }
-            $merged = foreach ($r in $rows) {
-                $h2 = $h2Rows | Where-Object { $_.model -eq $r.model } | Select-Object -First 1
-                if ($names -contains $r.model -and $h2) {
-                    $h2.engine = 'H1>H2'
-                    if ($h2.PSObject.Properties['mesher']) { $h2.mesher = 'H2 Quad fallback' }
-                    if ($h2.PSObject.Properties['fallback_h2']) { $h2.fallback_h2 = '1' }
-                    $h2
-                } else { $r }
+            for ($k = 0; $k -lt $fbIdx.Count -and $k -lt $h2Rows.Count; $k++) {
+                $h1 = $rows[$fbIdx[$k]]; $h2 = $h2Rows[$k]
+                $h2.engine      = 'H1>H2'
+                $h2.mesher      = 'H2 Quad fallback'
+                $h2.fallback_h2 = '1'
+                # H2 에는 솔리드 맵핑 정보가 없으므로 H1 의 솔리드/Unmappable 수와 실패 사유를 보존
+                $h2.solids       = $h1.solids
+                $h2.unmap_solids = $h1.unmap_solids
+                $notes = @()
+                if ("$($h1.note)".Trim()) { $notes += "H1: $($h1.note)" }
+                if ("$($h2.note)".Trim()) { $notes += "H2: $($h2.note)" }
+                $h2.note = $notes -join ' | '
+                $rows[$fbIdx[$k]] = $h2
+                $nFallback++
             }
-            $rows = @($merged)
-            $cols = if ($header) { @($header -split ',') } else { @($rows[0].PSObject.Properties.Name) }
-            $outLines = @($cols -join ',') + @($rows | Select-Object -Property $cols | ConvertTo-Csv -NoTypeInformation | Select-Object -Skip 1)
-            [IO.File]::WriteAllLines($csv, [string[]]$outLines, (New-Object Text.UTF8Encoding $true))
-            [IO.File]::WriteAllText($log, $logText, $utf8)
         }
     }
 
@@ -150,18 +222,26 @@ function Invoke-YLBatch {
         $inpPath = $inp -replace '/', '\'
         if ((Test-Path -LiteralPath $inpPath) -and ((Split-Path -Parent $inpPath) -eq $OutDir)) {
             New-Item -ItemType Directory -Force -Path $InpDir | Out-Null
-            Move-Item -LiteralPath $inpPath -Destination (Join-Path $InpDir (Split-Path -Leaf $inpPath)) -Force
+            $dest = Join-Path $InpDir (Split-Path -Leaf $inpPath)
+            Move-Item -LiteralPath $inpPath -Destination $dest -Force
+            $r.inp = $dest      # CSV 에도 옮긴 위치를 기록
         }
     }
 
-    if ($logText) { $logText -split "`r?`n" | Write-Host }
+    # 재시작/대체 실행분까지 합친 최종 CSV / 로그 저장
+    $csvOut = @($csvCols -join ',') + @($rows | Select-Object -Property $csvCols | ConvertTo-Csv -NoTypeInformation | Select-Object -Skip 1)
+    [IO.File]::WriteAllLines($csv, [string[]]$csvOut, (New-Object Text.UTF8Encoding $true))
+    [IO.File]::WriteAllText($log, $script:YLLogText, $utf8)
+
+    if ($script:YLLogText) { $script:YLLogText -split "`r?`n" | Write-Host }
     Write-Host "결과 : $OutDir (*.hm)   로그 / 요약 : $LogDir" -ForegroundColor Cyan
     Write-Host ''
-    $rows | Format-Table model, engine, status, solids, unmap_solids, n_hex, n_penta, n_quad, bad_jac, bad_warp, jac_min, seconds -AutoSize | Out-String -Width 260 | Write-Host
+    $rows | Format-Table model, engine, status, solids, unmap_solids, n_hex, n_penta, n_quad, bad_jac, bad_warp, bad_skew, jac_min, seconds -AutoSize | Out-String -Width 260 | Write-Host
     if ($rows.Count -lt $all.Count) {
-        Write-Warning "$($all.Count)개 중 $($rows.Count)개만 처리됨 - hmbatch 가 중간에 멈췄습니다 (_logs\hmbatch_console.txt, _logs\batch_log.txt 확인)"
+        Write-Warning "$($all.Count)개 중 $($rows.Count)개만 결과가 있습니다 (_logs\hmbatch_console*.txt, _logs\batch_log.txt 확인)"
         return 1
     }
+    if ($nFallback -gt 0) { Write-Warning "$nFallback 개 모델은 Hexa 생성 실패 -> 2D Quad 스킨(*_2DQuad.hm)으로 대체 저장됨 (engine=H1>H2)" }
     $fail = @($rows | Where-Object { $_.status -ne 'OK' }).Count
     if ($fail -gt 0) { Write-Warning "$fail 개 모델 실패 (Unmappable 솔리드는 CAD/HM에서 Solid Split 후 재실행 권장)"; return 1 }
     return 0
@@ -387,9 +467,14 @@ function Start-YL {
         }
         $outDir = $txtOut.Text.Trim()
         $exists = @()
+        # Hexa + 대체 저장이면 *_2DQuad.hm 도 생길 수 있으므로 같이 확인
+        $suffixes = @('.hm')
+        if ($rbModeHex.Checked -and $chkFallback.Checked) { $suffixes += '_2DQuad.hm' }
         foreach ($row in $grid.Rows) {
-            $f = Join-Path $outDir (([string]$row.Cells['Out'].Value) + '.hm')
-            if (Test-Path -LiteralPath $f) { $exists += [IO.Path]::GetFileName($f) }
+            foreach ($sfx in $suffixes) {
+                $f = Join-Path $outDir (([string]$row.Cells['Out'].Value) + $sfx)
+                if (Test-Path -LiteralPath $f) { $exists += [IO.Path]::GetFileName($f) }
+            }
         }
         if ($exists.Count -gt 0) {
             $shown = ($exists | Select-Object -First 8) -join "`n"
@@ -433,12 +518,19 @@ function Start-YL {
     })
     $btnFolder.Add_Click({
         $d = New-Object Windows.Forms.FolderBrowserDialog
-        $d.Description = '이 폴더와 하위 폴더의 STP/HM 파일을 추가합니다.'
+        $d.Description = '이 폴더와 하위 폴더의 STP/IGS/HM 파일을 추가합니다.'
         if ($cfg.LastFolder -and (Test-Path -LiteralPath $cfg.LastFolder)) { $d.SelectedPath = $cfg.LastFolder }
         if ($d.ShowDialog($form) -eq 'OK') {
             $cfg.LastFolder = $d.SelectedPath
-            $found = @(Get-ChildItem -LiteralPath $d.SelectedPath -Recurse -File | Where-Object { $_.Extension -match '^\.(stp|step|hm)$' } | ForEach-Object { $_.FullName })
-            if ($found.Count -eq 0) { [void][Windows.Forms.MessageBox]::Show('STP/HM 파일이 없습니다.', $form.Text) } else { Add-Models $found }
+            # 출력 폴더가 하위에 있으면 이전 결과(*.hm)까지 다시 메싱하게 되므로 제외
+            $outFull = ''
+            try { if ($txtOut.Text.Trim()) { $outFull = [IO.Path]::GetFullPath($txtOut.Text.Trim()).TrimEnd('\') + '\' } } catch { }
+            # [수정] 파일 추가 대화상자는 IGES 를 받는데 폴더 추가는 빠져 있었음
+            $found = @(Get-ChildItem -LiteralPath $d.SelectedPath -Recurse -File |
+                Where-Object { $_.Extension -match '^\.(stp|step|igs|iges|hm)$' } |
+                Where-Object { -not ($outFull -and $_.FullName.StartsWith($outFull, [StringComparison]::OrdinalIgnoreCase)) } |
+                ForEach-Object { $_.FullName })
+            if ($found.Count -eq 0) { [void][Windows.Forms.MessageBox]::Show('STP/IGS/HM 파일이 없습니다.', $form.Text) } else { Add-Models $found }
         }
     })
     $btnRemove.Add_Click({ foreach ($r in @($grid.SelectedRows)) { $grid.Rows.Remove($r) }; Update-View })
@@ -594,7 +686,8 @@ foreach YLB_MODEL $YLB_MODELS {
             set ::YL_RESULT [list status "FAIL" msg "import failed: $err"]
         } else {
             ylb_log "  imported: [ylb_count solids] solids, [ylb_count surfs] surfs, [ylb_count comps] comps"
-            if {[catch { uplevel #0 [list source $YLB_ENGINE] } err]} {
+            # 엔진 파일은 UTF-8 로 저장됨 -> -encoding 미지정 시 시스템 코드페이지(CP949)로 읽혀 한글 메시지가 깨짐
+            if {[catch { uplevel #0 [list source -encoding utf-8 $YLB_ENGINE] } err]} {
                 set ::YL_RESULT [list status "FAIL" msg "script error: $err"]
                 ylb_log "  --- errorInfo ---\n$::errorInfo\n  -----------------"
             }
@@ -715,12 +808,19 @@ proc hqc::smooth_hex {min_jac {passes 5}} {
     }
     *clearmark elems 1
 
-    # 2. 불량 요소 인접 내부 절점만 선별하여 품질 검증 기반 스무딩
+    # 2. 요소별 Scaled Jacobian 캐시 (절점 이동 시 그 절점을 쓰는 요소만 재계산)
+    array set J {}
+    foreach e [array names H] { set J($e) [elem_jac $e] }
+
+    # 3. 불량 요소 인접 내부 절점만 선별하여 품질 검증 기반 스무딩
     array set moved {}
     for {set p 0} {$p < $passes} {incr p} {
-        set cand {}
-        foreach e [array names H] {
-            if {[elem_jac $e] < $min_jac} {
+        # [수정] 예전 코드 'set cand {}' 는 cand 를 스칼라로 만들어 'set cand($n) 1' 에서
+        #        "variable isn't array" 에러 -> H1 의 catch 에 묻혀 스무딩이 한 번도 실행되지 않았음
+        array unset cand
+        array set cand {}
+        foreach e [array names J] {
+            if {$J($e) < $min_jac} {
                 foreach n $H($e) {
                     if {![info exists BND($n)]} { set cand($n) 1 }
                 }
@@ -730,7 +830,7 @@ proc hqc::smooth_hex {min_jac {passes 5}} {
         set changed 0
         foreach n [array names cand] {
             set els $NH($n)
-            # 인접 절점 수집 (같은 Hex 내 직접 연결된 이웃 절점)
+            # 인접 절점 수집 (이 절점을 공유하는 Hex 들의 나머지 절점 전체)
             array unset nbrs
             foreach e $els {
                 foreach m $H($e) { if {$m != $n} { set nbrs($m) 1 } }
@@ -743,25 +843,32 @@ proc hqc::smooth_hex {min_jac {passes 5}} {
                 set cx [expr {$cx + $x}]; set cy [expr {$cy + $y}]; set cz [expr {$cz + $z}]
             }
             set k [expr {double([llength $nb])}]
+            set cx [expr {$cx/$k}]; set cy [expr {$cy/$k}]; set cz [expr {$cz/$k}]
             set old $X($n)
             lassign $old ox oy oz
-            # 감쇠 계수 0.5 (과도한 이동으로 인한 반전 방지)
-            set trial [list [expr {0.5*($ox + $cx/$k)}] [expr {0.5*($oy + $cy/$k)}] [expr {0.5*($oz + $cz/$k)}]]
 
             set j_before 1e9
-            foreach e $els { set j [elem_jac $e]; if {$j < $j_before} { set j_before $j } }
-            set X($n) $trial
-            set j_after 1e9
-            foreach e $els { set j [elem_jac $e]; if {$j < $j_after} { set j_after $j } }
+            foreach e $els { if {$J($e) < $j_before} { set j_before $J($e) } }
 
-            if {$j_after > $j_before + 1e-4 && $j_after > 0.05} {
+            # 이동량 0.5 / 1.0 / 0.25 중 인접 요소 최소 SJ 가 가장 좋아지는 위치 채택
+            set best_j $j_before; set best_pos ""; set best_js {}
+            foreach a {0.5 1.0 0.25} {
+                set X($n) [list [expr {$ox + $a*($cx-$ox)}] [expr {$oy + $a*($cy-$oy)}] [expr {$oz + $a*($cz-$oz)}]]
+                set jmin 1e9; set js {}
+                foreach e $els { set j [elem_jac $e]; lappend js $e $j; if {$j < $jmin} { set jmin $j } }
+                if {$jmin > $best_j + 1e-4} { set best_j $jmin; set best_pos $X($n); set best_js $js }
+            }
+            # 인접 요소 최소값이 개선될 때만 채택 (단조 개선 -> 전체 최소 SJ 는 절대 나빠지지 않음).
+            # [수정] 예전의 'j_after > 0.05' 조건은 반전(음수) 요소를 단계적으로 풀어주는 이동까지 막았음
+            if {$best_pos ne ""} {
+                set X($n) $best_pos
+                foreach {e j} $best_js { set J($e) $j }
                 set moved($n) 1
                 incr changed
             } else {
                 set X($n) $old
             }
         }
-        array unset cand
         if {$changed == 0} { break }
     }
 
@@ -796,10 +903,11 @@ proc yhs_quant {sorted p} {
     return [lindex $sorted [expr {int(floor($p * ($n - 1)))}]]
 }
 
-# Quad 1개 면의 Warpage 각도 (deg): 두 대각선 분할 중 더 작은 이면각
+# Quad 1개 면의 Warpage 각도 (deg): 두 대각선 분할 각각의 이면각 중 큰 값
+# [수정] HyperMesh 의 Warpage 정의는 두 분할 중 "최대" 각도. 예전 코드는 최소값을 써서 warp_max 를 과소 보고했음
 proc yhs_quad_warp {p0 p1 p2 p3} {
     set rad [expr {180.0 / acos(-1.0)}]
-    set w 180.0
+    set w 0.0
     foreach {a b c d} [list $p0 $p1 $p2 $p3  $p1 $p2 $p3 $p0] {
         set n1 [yhs_cross [yhs_sub $b $a] [yhs_sub $c $a]]
         set n2 [yhs_cross [yhs_sub $c $a] [yhs_sub $d $a]]
@@ -807,9 +915,9 @@ proc yhs_quad_warp {p0 p1 p2 p3} {
         if {$l1 < 1e-14 || $l2 < 1e-14} { continue }
         set cang [expr {max(-1.0, min(1.0, [yhs_dot $n1 $n2] / ($l1 * $l2)))}]
         set ang [expr {acos($cang) * $rad}]
-        if {$ang < $w} { set w $ang }
+        if {$ang > $w} { set w $ang }
     }
-    return [expr {$w > 179.9 ? 0.0 : $w}]
+    return $w
 }
 
 proc yhs_hex_stats {elist {maxn 300000}} {
@@ -896,9 +1004,11 @@ if {[info exists ::YL_OUT_DIR]}       { set OUT_DIR          $::YL_OUT_DIR }
 if {[info exists ::YL_BASE_NAME]}     { set BASE_NAME        $::YL_BASE_NAME }
 file mkdir $OUT_DIR
 
+set EQUIV_GLOBAL [expr {[info exists ::env(YL_EQUIV_GLOBAL)] && [string trim $::env(YL_EQUIV_GLOBAL)] eq "1"}]
+
 set ylh_DIR [file dirname [file normalize [info script]]]
-source [file join $ylh_DIR "YL_HEX_qclean.tcl"]
-source [file join $ylh_DIR "YL_HEX_stats.tcl"]
+source -encoding utf-8 [file join $ylh_DIR "YL_HEX_qclean.tcl"]
+source -encoding utf-8 [file join $ylh_DIR "YL_HEX_stats.tcl"]
 
 # ---------------- helpers ----------------
 proc ylh_count_elems {cfgs} {
@@ -923,6 +1033,31 @@ proc ylh_solid_3d_count {sid} {
     return $n
 }
 
+# 절점 병합: 기본은 컴포넌트(=CAD Part) 단위로만 병합.
+#   전체 일괄 병합은 서로 다른 부품의 접촉면 절점까지 붙여버려(조립품이 한 덩어리로 Tied) 해석이 틀어짐.
+#   YL_EQUIV_GLOBAL=1 이면 예전처럼 전체 병합. "by comp id" 미지원 등으로 실패하면 자동으로 전체 병합.
+proc ylh_equivalence_3d {tol global} {
+    if {!$global} {
+        *clearmark comps 1; *createmark comps 1 "all"
+        set cids [hm_getmark comps 1]
+        *clearmark comps 1
+        set ok 1
+        foreach cid $cids {
+            *clearmark elems 1
+            if {[catch { *createmark elems 1 "by comp id" $cid }]} { set ok 0; break }
+            if {[llength [hm_getmark elems 1]] > 1} { catch { *equivalence elems 1 $tol 1 0 0 } }
+            *clearmark elems 1
+        }
+        *clearmark elems 1
+        if {$ok} { return "per-comp" }
+    }
+    *clearmark elems 1
+    catch { *createmark elems 1 "by config" hex8 penta6 pyramid5 tetra4 }
+    if {[llength [hm_getmark elems 1]] > 0} { catch { *equivalence elems 1 $tol 1 0 0 } }
+    *clearmark elems 1
+    return "global"
+}
+
 # Abaqus 템플릿(standard.3d)에서 {config type} 동적 파싱 (버전 차이 방지)
 proc ylh_lookup_abaqus_type {ename tpl_path} {
     set ename [string toupper [string trim $ename]]
@@ -930,7 +1065,9 @@ proc ylh_lookup_abaqus_type {ename tpl_path} {
         if {![catch {open $tpl_path r} fh]} {
             set txt [read $fh]
             close $fh
-            set pat [format {\*elements\(\s*(\d+)\s*,\s*(\d+)\s*,\s*%s\b} $ename]
+            # [수정] Tcl 정규식의 \b 는 "단어 경계"가 아니라 백스페이스 문자라서 예전 패턴은 절대 매칭되지 않았음.
+            #        이름 뒤가 , 또는 ) 로 끝나는지로 정확히 일치시키고, 따옴표 유무 둘 다 허용
+            set pat [format {\*elements\(\s*(\d+)\s*,\s*(\d+)\s*,\s*"?%s"?\s*[,)]} $ename]
             if {[regexp -nocase $pat $txt -> cfg typ]} {
                 return [list $cfg $typ]
             }
@@ -1014,17 +1151,16 @@ if {[catch {
 }
 *clearmark solids 1
 
-# 다중 솔리드 경계 절점 병합(Equivalence)
-*clearmark elems 1
-catch { *createmark elems 1 "by config" hex8 penta6 pyramid5 }
-if {[llength [hm_getmark elems 1]] > 0} {
-    catch { *equivalence elems 1 [expr {0.001 * $ELEM_SIZE}] 1 0 0 }
-}
-*clearmark elems 1
-
+# 2D 스킨 먼저 삭제 (컴포넌트 단위 병합 시 3D 요소만 대상이 되도록)
 if {$DELETE_2D_SKIN} {
     ylh_delete_elems {tria3 tria6 quad4 quad8}
 }
+
+# 다중 솔리드 경계 절점 병합(Equivalence) - 기본: 컴포넌트(Part) 단위
+set equiv_mode [ylh_equivalence_3d [expr {0.001 * $ELEM_SIZE}] $EQUIV_GLOBAL]
+
+set n_hex   [ylh_count_elems {hex8 hex20}]
+set n_penta [ylh_count_elems {penta6 penta15}]
 
 # Unmappable(미생성) 솔리드 판별
 set unmap_ids {}
@@ -1032,13 +1168,20 @@ foreach s $solid_ids {
     if {[ylh_solid_3d_count $s] == 0} { lappend unmap_ids $s }
 }
 set n_unmap [llength $unmap_ids]
-set n_hex   [ylh_count_elems {hex8 hex20}]
-set n_penta [ylh_count_elems {penta6 penta15}]
+# 요소는 생성됐는데 "모든" 솔리드가 요소 0개로 조회되면 판정이 아니라 솔리드-요소 연관 조회 자체가 실패한 것.
+# 이 경우 전부 Unmappable 로 오판 -> 불필요한 H2 대체가 일어나므로 '판정 불가(-1)'로 처리
+set unmap_check_ok 1
+if {$n_unmap == $n_solids && $n_hex + $n_penta > 0} {
+    set unmap_check_ok 0
+    set n_unmap -1
+    set unmap_ids {}
+}
 
 # ---------------- 3. 3D Hex 내부 절점 스무딩 (위상 보존) ----------------
 set n_smoothed 0
+set smooth_err ""
 if {$n_hex > 0} {
-    catch { set n_smoothed [hqc::smooth_hex $MIN_JACOBIAN 5] }
+    if {[catch { set n_smoothed [hqc::smooth_hex $MIN_JACOBIAN 5] } e]} { set smooth_err "smoothing error: $e" }
 }
 
 # ---------------- 4. 3D 품질 검사 (1차 요소 기준 측정) ----------------
@@ -1066,11 +1209,13 @@ set hex_eids [hm_getmark elems 1]
 set HS [yhs_hex_stats $hex_eids 300000]
 array unset ::YHX
 
+# [수정] expr {c ? [format %.3f ..] : ""} 는 결과를 다시 숫자로 바꿔 "0.500" -> "0.5" 처럼 자릿수가 사라짐
+proc ylh_fmt {d key fmt} { if {[dict exists $d $key]} { return [format $fmt [dict get $d $key]] }; return "" }
 set neg_jac  [dict get $HS neg_jac]
-set jac_min  [expr {[dict exists $HS jac_min]  ? [format %.3f [dict get $HS jac_min]]  : ""}]
-set jac_mean [expr {[dict exists $HS jac_mean] ? [format %.3f [dict get $HS jac_mean]] : ""}]
-set warp_max [expr {[dict exists $HS warp_max] ? [format %.2f [dict get $HS warp_max]] : ""}]
-set asp_p95  [expr {[dict exists $HS asp_p95]  ? [format %.2f [dict get $HS asp_p95]]  : ""}]
+set jac_min  [ylh_fmt $HS jac_min  %.3f]
+set jac_mean [ylh_fmt $HS jac_mean %.3f]
+set warp_max [ylh_fmt $HS warp_max %.2f]
+set asp_p95  [ylh_fmt $HS asp_p95  %.2f]
 
 # ---------------- 5. Abaqus 요소 차수/타입 적용 ----------------
 set tpl_path "[hm_info -appinfo SPECIFIEDPATH TEMPLATES_DIR]/feoutput/abaqus/standard.3d"
@@ -1094,6 +1239,10 @@ if {$n_hex + $n_penta > 0} {
             catch { *orderchangetosecond 1 1 }
         }
         *clearmark elems 1
+        # [수정] 2차 변환이 실패해도 예전엔 hex20 이 0개라 타입 지정이 그냥 건너뛰어지고 OK 로 통과했음
+        if {$n_hex > 0 && [ylh_count_elems {hex20}] == 0} {
+            set type_err "2차(Hex20) 변환 실패: 요청='$ABAQUS_ELEM_TYPE' 이지만 Hex8 그대로 남음"
+        }
     }
 
     # Hex 타입 지정
@@ -1122,7 +1271,7 @@ if {$n_hex + $n_penta > 0} {
             *clearmark elems 1
         }
     }
-    if {$assigned_hex_type ne "" && $assigned_hex_type ne $ABAQUS_ELEM_TYPE} {
+    if {$type_err eq "" && $assigned_hex_type ne "" && $assigned_hex_type ne $ABAQUS_ELEM_TYPE} {
         set type_err "요소 타입 불일치: 실제='$assigned_hex_type', 요청='$ABAQUS_ELEM_TYPE'"
     }
 }
@@ -1131,7 +1280,8 @@ set n_hex   [ylh_count_elems {hex8 hex20}]
 set n_penta [ylh_count_elems {penta6 penta15}]
 
 # ---------------- 6. 합격 판정 및 저장 / INP 출력 ----------------
-set pass_hex [expr {$sm_err eq "" && $type_err eq "" && $n_hex > 0 && $n_unmap == 0 && $neg_jac == 0 && $bad_jac == 0 && $bad_warp == 0 && $bad_asp == 0 ? 1 : 0}]
+# [수정] GUI 에서 설정하는 Skew 한계가 예전엔 합격 판정에 전혀 반영되지 않았음 -> bad_skew 포함
+set pass_hex [expr {$sm_err eq "" && $type_err eq "" && $n_hex > 0 && $n_unmap == 0 && $neg_jac == 0 && $bad_jac == 0 && $bad_warp == 0 && $bad_asp == 0 && $bad_skew == 0 ? 1 : 0}]
 set fallback_h2 [expr {($n_hex == 0 || $n_unmap > 0) && $QUAD_FALLBACK ? 1 : 0}]
 
 set out_stem "${BASE_NAME}_HEX_${ABAQUS_ELEM_TYPE}_${ELEM_SIZE}mm"
@@ -1143,22 +1293,34 @@ set inp_err ""
 catch { hm_answernext yes }
 set write_failed [catch { *writefile "$out_hm" 1 } write_err]
 
-if {$EXPORT_INP && $n_hex > 0 && $neg_jac == 0} {
-    set out_inp "$OUT_DIR/${out_stem}.inp"
-    catch { file delete $out_inp }
-    catch { hm_answernext yes }
-    if {[catch {
-        *createstringarray 2 "HMBOMCOMMENTS_XML" "EXPORTIDS_SKIP"
-        *feoutputwithdata $tpl_path $out_inp 0 0 2 1 2
-    } inp_err]} { set inp_err "INP EXPORT FAILED: $inp_err" } else { set inp_err "" }
+set inp_note ""
+if {$EXPORT_INP} {
+    # 요소 타입 지정이 실패한 모델은 틀린 타입으로 INP 가 나가므로 출력하지 않음
+    if {$n_hex > 0 && $neg_jac == 0 && $type_err eq ""} {
+        set out_inp "$OUT_DIR/${out_stem}.inp"
+        catch { file delete $out_inp }
+        catch { hm_answernext yes }
+        if {[catch {
+            *createstringarray 2 "HMBOMCOMMENTS_XML" "EXPORTIDS_SKIP"
+            *feoutputwithdata $tpl_path $out_inp 0 0 2 1 2
+        } inp_err]} { set inp_err "INP EXPORT FAILED: $inp_err" } else { set inp_err "" }
+        # 명령이 에러 없이 끝나도 파일이 안 생기는 경우가 있으므로 실제 파일로 확인
+        if {$inp_err eq "" && ![file exists $out_inp]} { set inp_err "INP EXPORT FAILED: 파일이 생성되지 않음 ($out_inp)" }
+        if {$inp_err ne ""} { set out_inp "" }
+    } else {
+        set inp_note "INP 출력 생략: Hex 요소 없음 / 음수 Jacobian / 요소 타입 오류 중 하나"
+    }
 }
 
-set msg [format "YL_H1 (Multi-Solid Map Hexa) 완료\n- Size: %.2f mm, Type: %s (실제: %s), QuadMode: %s\n- Solids: %d (Unmappable: %d -> %s)\n- Elements: Hex=%d, Penta=%d (Smoothed interior nodes: %d)\n- Quality: BadJac(<%.2f)=%d, NegJac=%d, BadWarp(>%.1f)=%d, BadAsp(>%.1f)=%d, BadSkew(>%.1f)=%d\n- Stats: Jac min=%s mean=%s, Warp max=%s, Asp p95=%s\n- Saved: %s" \
-    $ELEM_SIZE $ABAQUS_ELEM_TYPE $assigned_hex_type $QUAD_MODE \
-    $n_solids $n_unmap [join [lrange $unmap_ids 0 9] ","] \
+set unmap_txt [expr {$unmap_check_ok ? [join [lrange $unmap_ids 0 9] ","] : "판정 불가"}]
+set msg [format "YL_H1 (Multi-Solid Map Hexa) 완료\n- Size: %.2f mm, Type: %s (실제: %s), QuadMode: %s, Equivalence: %s\n- Solids: %d (Unmappable: %d -> %s)\n- Elements: Hex=%d, Penta=%d (Smoothed interior nodes: %d)\n- Quality(HM): BadJac(<%.2f)=%d, BadWarp(>%.1f)=%d, BadAsp(>%.1f)=%d, BadSkew(>%.1f)=%d\n- Stats(Scaled Jacobian): NegJac=%d, SJ min=%s mean=%s, Warp max=%s, Asp p95=%s\n- Saved: %s" \
+    $ELEM_SIZE $ABAQUS_ELEM_TYPE $assigned_hex_type $QUAD_MODE $equiv_mode \
+    $n_solids $n_unmap $unmap_txt \
     $n_hex $n_penta $n_smoothed \
-    $MIN_JACOBIAN $bad_jac $neg_jac $MAX_WARPAGE $bad_warp $TARGET_ASPECT $bad_asp $MAX_SKEW $bad_skew \
-    $jac_min $jac_mean $warp_max $asp_p95 $out_hm]
+    $MIN_JACOBIAN $bad_jac $MAX_WARPAGE $bad_warp $TARGET_ASPECT $bad_asp $MAX_SKEW $bad_skew \
+    $neg_jac $jac_min $jac_mean $warp_max $asp_p95 $out_hm]
+if {$smooth_err ne ""} { append msg "\n- WARN: $smooth_err" }
+if {$inp_note ne ""}   { append msg "\n- NOTE: $inp_note" }
 
 set _status "OK"
 set _why {}
@@ -1168,10 +1330,18 @@ if {$type_err ne ""} { lappend _why $type_err }
 if {$inp_err ne ""} { lappend _why $inp_err }
 if {$n_hex == 0} { lappend _why "NO HEX ELEMENTS CREATED (솔리드 분할 필요)" }
 if {$n_unmap > 0} { lappend _why "$n_unmap SOLID(S) UNMAPPABLE (ID: [join [lrange $unmap_ids 0 9] ,])" }
+if {!$unmap_check_ok} { lappend _why "UNMAPPABLE 판정 불가 (솔리드-요소 연관 조회 실패: *findmark solids->elems 확인 필요)" }
 if {$neg_jac > 0} { lappend _why "$neg_jac NEGATIVE JACOBIAN HEX(ES)" }
 if {$bad_jac > 0} { lappend _why "$bad_jac HEX(ES) BELOW JACOBIAN $MIN_JACOBIAN" }
 if {$bad_warp > 0} { lappend _why "$bad_warp HEX(ES) ABOVE WARPAGE $MAX_WARPAGE" }
 if {$bad_asp > 0} { lappend _why "$bad_asp HEX(ES) ABOVE ASPECT $TARGET_ASPECT" }
+if {$bad_skew > 0} { lappend _why "$bad_skew HEX(ES) ABOVE SKEW $MAX_SKEW" }
+# [수정] 품질검사 명령 자체가 실패(-1)하면 예전엔 status=OK, pass_hex=0 으로 서로 모순된 결과가 나왔음
+if {$n_hex + $n_penta > 0} {
+    foreach {lbl v} [list Jacobian $bad_jac Warpage $bad_warp Aspect $bad_asp Skew $bad_skew] {
+        if {$v < 0} { lappend _why "3D $lbl 품질검사 명령 실행 실패" }
+    }
+}
 if {[llength $_why] > 0} {
     set _status "FAIL"
     foreach w $_why { append msg "\n*** $w" }
@@ -1368,20 +1538,31 @@ if {$n_quad + $n_tria > 0} {
     }
 }
 
+# [수정] 출력 이름은 PowerShell 이 정한 이름을 그대로 사용.
+#        (예전엔 여기서 항상 _2DQuad 를 붙여서, 2D 모드에선 GUI 덮어쓰기 확인이 실제 파일을 못 찾고
+#         '메시 정보 붙이기' 와 겹쳐 name_2DQuad_2.0mm_2DQuad.hm 처럼 중복됐음. 대체(fallback) 실행 시엔
+#         PowerShell 이 이름 뒤에 _2DQuad 를 붙여서 넘겨줌)
 set out_stem "${BASE_NAME}_2DQuad_${ELEM_SIZE}mm"
-if {[info exists ::YL_OUT_NAME] && [string trim $::YL_OUT_NAME] ne ""} { set out_stem "[string trim $::YL_OUT_NAME]_2DQuad" }
+if {[info exists ::YL_OUT_NAME] && [string trim $::YL_OUT_NAME] ne ""} { set out_stem [string trim $::YL_OUT_NAME] }
 set out_hm "$OUT_DIR/${out_stem}.hm"
 catch { hm_answernext yes }
 set write_failed [catch { *writefile "$out_hm" 1 } write_err]
 
-set pass_2d [expr {$bm_err eq "" && $n_quad > 0 && $bad_jac == 0 && $bad_warp == 0 && $bad_asp == 0 ? 1 : 0}]
+set pass_2d [expr {$bm_err eq "" && $n_quad > 0 && $bad_jac == 0 && $bad_warp == 0 && $bad_asp == 0 && $bad_skew == 0 ? 1 : 0}]
 set _status [expr {$pass_2d && !$write_failed ? "OK" : "FAIL"}]
 set msg [format "YL_H2 (2D Quad/Mixed 스킨) 완료\n- Size: %.2f mm, Mode: %s\n- Elements: Quad4=%d, Tria3=%d\n- Quality: BadJac=%d, BadWarp=%d, BadAsp=%d, BadSkew=%d\n- Saved: %s" \
     $ELEM_SIZE $QUAD_MODE $n_quad $n_tria $bad_jac $bad_warp $bad_asp $bad_skew $out_hm]
 if {$bm_err ne ""} { append msg "\n*** $bm_err" }
+if {$write_failed} { append msg "\n*** SAVE FAILED: $write_err" }
+if {$n_quad == 0} { append msg "\n*** NO QUAD ELEMENTS CREATED" }
+if {$n_quad + $n_tria > 0} {
+    foreach {lbl v} [list Jacobian $bad_jac Warpage $bad_warp Aspect $bad_asp Skew $bad_skew] {
+        if {$v < 0} { append msg "\n*** 2D $lbl 품질검사 명령 실행 실패" } elseif {$v > 0} { append msg "\n*** $v ELEM(S) FAIL 2D $lbl" }
+    }
+}
 
 set ::YL_RESULT [list status $_status engine "H2" mesher "BatchMesherQuad" size $ELEM_SIZE etype "2D_QUAD" \
-    solids $n_solids unmap_solids $n_solids surfs $n_surfs n_hex 0 n_penta 0 n_quad $n_quad n_tria $n_tria \
+    solids $n_solids unmap_solids "" surfs $n_surfs n_hex 0 n_penta 0 n_quad $n_quad n_tria $n_tria \
     bad_jac $bad_jac bad_warp $bad_warp bad_asp $bad_asp bad_skew $bad_skew neg_jac 0 \
     jac_min "" jac_mean "" warp_max "" asp_p95 "" smoothed_nodes 0 \
     pass_hex $pass_2d fallback_h2 0 out $out_hm inp "" msg $msg]
