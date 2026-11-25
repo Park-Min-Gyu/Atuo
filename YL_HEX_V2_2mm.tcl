@@ -4,6 +4,8 @@
 #   - Pure-Quad priority (minimizes Tria/Penta mixing)
 #   - Curved/Fillet refinement + Automatic unmeshed-hole patching
 #   - Modular tunable functions for direct user editing
+#   - Narrow CAD face defeature before SolidMap (removes thin hex layers / aspect 100+)
+#   - Reports the ACTUAL hex edge length so the 2.0 mm size can be verified
 #
 #   Run inside HyperMesh 2019:
 #     File -> Run -> Tcl/Tk Script -> Select YL_HEX_V2_2mm.tcl
@@ -12,9 +14,14 @@
 # =====================================================================
 # [USER TUNABLE PARAMETERS] - Edit values here to test directly!
 # =====================================================================
+# Element size is fixed HERE ONLY - every module reads this one value.
+set ::YLH_ELEM_SIZE 2.0
+
 proc ylh_default_params {} {
     return [list \
-        elem_size      2.0     \
+        elem_size      $::YLH_ELEM_SIZE \
+        defeature      1       \
+        defeature_width 1.0    \
         quad_mode      "quads" \
         feature_angle  20.0    \
         min_len_factor 0.20    \
@@ -399,8 +406,9 @@ proc yhs_hex_stats {elist {maxn 300000}} {
     set step 1
     if {[llength $elist] > $maxn} { set step [expr {int(ceil(double([llength $elist]) / $maxn))}] }
 
-    set jacs {}; set warps {}; set asps {}
-    set neg 0; set n 0; set i 0
+    set jacs {}; set warps {}; set asps {}; set lmeans {}
+    set neg 0; set n 0; set i 0; set nsliver 0
+    set sliver_len [expr {0.25 * $::YLH_ELEM_SIZE}]
     set edges {{0 1} {1 2} {2 3} {3 0} {4 5} {5 6} {6 7} {7 4} {0 4} {1 5} {2 6} {3 7}}
     set faces {{0 1 2 3} {4 5 6 7} {0 1 5 4} {1 2 6 5} {2 3 7 6} {3 0 4 7}}
 
@@ -418,14 +426,17 @@ proc yhs_hex_stats {elist {maxn 300000}} {
             set w [yhs_quad_warp [lindex $P [lindex $f 0]] [lindex $P [lindex $f 1]] [lindex $P [lindex $f 2]] [lindex $P [lindex $f 3]]]
             if {$w > $wmax} { set wmax $w }
         }
-        set lmin 1e30; set lmax 0.0
+        set lmin 1e30; set lmax 0.0; set lsum 0.0
         foreach ed $edges {
             set l [yhs_len [yhs_sub [lindex $P [lindex $ed 1]] [lindex $P [lindex $ed 0]]]]
             if {$l < $lmin} { set lmin $l }
             if {$l > $lmax} { set lmax $l }
+            set lsum [expr {$lsum + $l}]
         }
         set asp [expr {$lmin > 1e-12 ? $lmax / $lmin : 1e6}]
         lappend jacs $j; lappend warps $wmax; lappend asps $asp
+        lappend lmeans [expr {$lsum / 12.0}]
+        if {$lmin < $sliver_len} { incr nsliver }
         incr n
     }
     if {$n == 0} { return $R }
@@ -439,6 +450,13 @@ proc yhs_hex_stats {elist {maxn 300000}} {
     dict set R jac_mean [expr {$sj / $n}]
     dict set R warp_max [lindex $warps end]
     dict set R asp_p95  [yhs_quant $asps 0.95]
+    # actual element size = mean edge length per hex (median over all hexes)
+    set lmeans [lsort -real $lmeans]
+    dict set R size_med [yhs_quant $lmeans 0.50]
+    dict set R size_p05 [yhs_quant $lmeans 0.05]
+    dict set R size_p95 [yhs_quant $lmeans 0.95]
+    dict set R n_sliver $nsliver
+    dict set R sliver_len $sliver_len
     return $R
 }
 
@@ -707,8 +725,8 @@ proc ylh2_patch_unmeshed {surf_ids elem_size quad_mode} {
 }
 
 proc ylh2_run {cfg_dict} {
-    # Element size strictly fixed to 2.0 mm
-    set ELEM_SIZE      2.0
+    # Element size strictly fixed (::YLH_ELEM_SIZE)
+    set ELEM_SIZE      $::YLH_ELEM_SIZE
     set TARGET_ASPECT  [expr {double([dict get $cfg_dict aspect])}]
     set MIN_JACOBIAN   [expr {double([dict get $cfg_dict min_jac])}]
     set MAX_WARPAGE    [expr {double([dict get $cfg_dict max_warp])}]
@@ -857,9 +875,61 @@ proc ylh1_run_solidmap {solid_ids elem_size quad_mode custom_flags} {
     return $sm_err
 }
 
+# --- [TUNABLE FUNCTION 7] Narrow CAD face defeature before SolidMap ---
+#   CATIA solids often carry strip faces only 0.01-0.5 mm wide (tiny fillets/chamfers,
+#   faces split into bands). SolidMap puts a node row on EVERY face boundary, so each
+#   strip becomes a hex layer as thin as the strip (aspect 100+), and stacks of strips
+#   at part ends turn into tria/penta patches.
+#   BatchMesher geometry cleanup merges faces narrower than 'width' into their
+#   neighbours (suppresses the shared edges); its temporary 2D mesh is deleted.
+#   Duplicate/overlap surface repair is switched OFF so the solid itself is not edited.
+#   Returns {ok text}. ok=0 only if the solid count changed (model must be reloaded).
+proc ylh1_defeature {elem_size width} {
+    *clearmark solids 1; *createmark solids 1 "all"
+    set n0 [llength [hm_getmark solids 1]]
+    *clearmark solids 1
+    *clearmark surfs 1; *createmark surfs 1 "all"
+    set surf_ids [hm_getmark surfs 1]
+    *clearmark surfs 1
+    if {[llength $surf_ids] == 0} { return [list 1 "skipped (no surfaces)"] }
+
+    set work_dir [ylh_ascii_temp_dir]
+    set stem "_ylh1df_[pid]"
+    lassign [ylh2_write_quad_bm_files $work_dir $stem $elem_size 30.0 0.2 1.6 "mixed" "standard" 0.3 30.0 70.0 10.0] cr pr
+    # cleanup-only overrides: merge narrow faces, never delete / repair surfaces
+    set fh [open $pr r]; set txt [read $fh]; close $fh
+    foreach {key val} [list narrow_surfs_merge_width [format %.4g $width] narrow_surfs_treat_flags 3 \
+                            del_dupl_surfs_flag 0 fix_overlapsurfs_flag 0 edges_stitch_flags 0] {
+        regsub -line "^${key}\[ \t\]+.*\$" $txt [format "%-34s%s" $key $val] txt
+    }
+    set fh [open $pr w]; puts -nonewline $fh $txt; close $fh
+
+    *clearmark lines 1; *createmark lines 1 "all"
+    catch { *maskmark lines 1 }
+    *clearmark lines 1
+    set err ""
+    *clearmark surfs 1
+    eval *createmark surfs 1 $surf_ids
+    if {[catch { *hm_batchmesh 1 $cr $pr } e]} { set err $e }
+    *clearmark surfs 1
+    catch { *unmaskall2 }
+    catch { file delete $cr $pr }
+    foreach f [glob -nocomplain -directory $work_dir "*${stem}*"] { catch { file delete $f } }
+    ylh_delete_elems {tria3 tria6 quad4 quad8}
+
+    *clearmark solids 1; *createmark solids 1 "all"
+    set n1 [llength [hm_getmark solids 1]]
+    *clearmark solids 1
+    if {$n1 != $n0} { return [list 0 "solid count changed $n0 -> $n1 during geometry cleanup"] }
+    if {$err ne ""} { return [list 1 "WARN cleanup failed ($err) - SolidMap runs on the original faces"] }
+    return [list 1 "OK - faces narrower than [format %.2f $width] mm merged into neighbours"]
+}
+
 proc ylh1_run {cfg_dict} {
-    # Element size strictly fixed to 2.0 mm
-    set ELEM_SIZE        2.0
+    # Element size strictly fixed (::YLH_ELEM_SIZE)
+    set ELEM_SIZE        $::YLH_ELEM_SIZE
+    set DEFEATURE        [expr {[dict exists $cfg_dict defeature] ? [dict get $cfg_dict defeature] : 1}]
+    set DEFEATURE_WIDTH  [expr {[dict exists $cfg_dict defeature_width] ? double([dict get $cfg_dict defeature_width]) : 0.5 * $::YLH_ELEM_SIZE}]
     set TARGET_ASPECT    [expr {double([dict get $cfg_dict aspect])}]
     set MIN_JACOBIAN     [expr {double([dict get $cfg_dict min_jac])}]
     set MAX_WARPAGE      [expr {double([dict get $cfg_dict max_warp])}]
@@ -901,6 +971,20 @@ proc ylh1_run {cfg_dict} {
         ylh_delete_elems {tria3 tria6 quad4 quad8 tetra4 tetra10 hex8 hex20 penta6 penta15 pyramid5 pyramid13}
     }
     catch { *elementorder 1 }
+
+    # 1b. Narrow CAD face defeature (thin hex layers / aspect 100+ / tria-penta tips)
+    set df_txt "off"
+    if {$DEFEATURE && $SELECT_MODE ne "all"} {
+        set df_txt "skipped (pick mode: only runs on 'All Solids / Surfaces')"
+    } elseif {$DEFEATURE} {
+        lassign [ylh1_defeature $ELEM_SIZE $DEFEATURE_WIDTH] df_ok df_txt
+        if {!$df_ok} {
+            return [dict create status FAIL msg "YL_H1 stopped before SolidMap.\n\nDefeature: $df_txt\n\nReload the model and run again with 'Defeature narrow CAD faces' unchecked."]
+        }
+        *clearmark solids 1; *createmark solids 1 "all"
+        set solid_ids [hm_getmark solids 1]
+        *clearmark solids 1
+    }
 
     # 2. Multi-Solid Map at 2.0 mm
     set sm_err [ylh1_run_solidmap $solid_ids $ELEM_SIZE $QUAD_MODE $CUSTOM_FLAGS]
@@ -976,6 +1060,11 @@ proc ylh1_run {cfg_dict} {
     set jac_mean [ylh_fmt $HS jac_mean %.3f]
     set warp_max [ylh_fmt $HS warp_max %.2f]
     set asp_p95  [ylh_fmt $HS asp_p95  %.2f]
+    set size_med [ylh_fmt $HS size_med %.2f]
+    set size_p05 [ylh_fmt $HS size_p05 %.2f]
+    set size_p95 [ylh_fmt $HS size_p95 %.2f]
+    set n_sliver [expr {[dict exists $HS n_sliver] ? [dict get $HS n_sliver] : 0}]
+    set sliver_len [expr {0.25 * $ELEM_SIZE}]
 
     # 5. Abaqus Element Order & Type Assignment
     set tpl_path "[hm_info -appinfo SPECIFIEDPATH TEMPLATES_DIR]/feoutput/abaqus/standard.3d"
@@ -1081,6 +1170,10 @@ proc ylh1_run {cfg_dict} {
     if {$bad_warp > 0}    { lappend _why "$bad_warp HEX(ES) ABOVE WARPAGE $MAX_WARPAGE" }
     if {$bad_asp > 0}     { lappend _why "$bad_asp HEX(ES) ABOVE ASPECT $TARGET_ASPECT" }
     if {$bad_skew > 0}    { lappend _why "$bad_skew HEX(ES) ABOVE SKEW $MAX_SKEW" }
+    if {$size_med ne "" && abs($size_med - $ELEM_SIZE) > 0.3 * $ELEM_SIZE} {
+        lappend _why "ACTUAL HEX SIZE $size_med mm IS NOT THE TARGET $ELEM_SIZE mm"
+    }
+    if {$n_sliver > 0}    { lappend _why "$n_sliver SLIVER HEX(ES): shortest edge < [format %.2f $sliver_len] mm (narrow CAD faces -> raise Defeature width)" }
     if {$n_hex + $n_penta > 0} {
         foreach {lbl v} [list Jacobian $bad_jac Warpage $bad_warp Aspect $bad_asp Skew $bad_skew] {
             if {$v < 0} { lappend _why "3D $lbl check command failed" }
@@ -1089,10 +1182,10 @@ proc ylh1_run {cfg_dict} {
 
     set status [expr {[llength $_why] == 0 ? "OK" : "FAIL"}]
     set unmap_txt [expr {$unmap_check_ok ? ($n_unmap > 0 ? [join [lrange $unmap_ids 0 9] ","] : "none") : "indeterminate"}]
-    set msg [format "YL_H1 (Multi-Solid Map Hexa, Fixed 2.0mm) Finished\n\n- Status: %s\n- Size: %.2f mm (FIXED), Type: %s (actual: %s)\n- QuadMode: %s, Equivalence: %s\n- Solids: %d (Unmappable: %d -> %s)\n- Elements: Hex=%d, Penta=%d (Wedge ratio: %.2f%%)\n- 3D Interior Smoothing: %d nodes moved\n- Quality (HM):\n    Bad Jacobian (<%.2f) : %d\n    Bad Warpage  (>%.1f) : %d\n    Bad Aspect   (>%.1f) : %d\n    Bad Skew     (>%.1f) : %d\n- Stats (Scaled Jacobian):\n    NegJac=%d, SJ min=%s, SJ mean=%s, Warp max=%s, Asp p95=%s\n- Saved HM: %s\n- Exported INP: %s" \
+    set msg [format "YL_H1 (Multi-Solid Map Hexa, Fixed 2.0mm) Finished\n\n- Status: %s\n- Size: %.2f mm (FIXED), Type: %s (actual: %s)\n- QuadMode: %s, Equivalence: %s\n- Defeature: %s\n- Solids: %d (Unmappable: %d -> %s)\n- Elements: Hex=%d, Penta=%d (Wedge ratio: %.2f%%)\n- Actual size: hex edge median %s mm (p5 %s / p95 %s), target %.1f mm\n- Sliver hexes (shortest edge < %.2f mm): %d\n- 3D Interior Smoothing: %d nodes moved\n- Quality (HM):\n    Bad Jacobian (<%.2f) : %d\n    Bad Warpage  (>%.1f) : %d\n    Bad Aspect   (>%.1f) : %d\n    Bad Skew     (>%.1f) : %d\n- Stats (Scaled Jacobian):\n    NegJac=%d, SJ min=%s, SJ mean=%s, Warp max=%s, Asp p95=%s\n- Saved HM: %s\n- Exported INP: %s" \
         $status $ELEM_SIZE $ABAQUS_ELEM_TYPE $assigned_hex_type \
-        $QUAD_MODE $equiv_mode $n_solids $n_unmap $unmap_txt \
-        $n_hex $n_penta $penta_pct $n_smoothed \
+        $QUAD_MODE $equiv_mode $df_txt $n_solids $n_unmap $unmap_txt \
+        $n_hex $n_penta $penta_pct $size_med $size_p05 $size_p95 $ELEM_SIZE $sliver_len $n_sliver $n_smoothed \
         $MIN_JACOBIAN $bad_jac $MAX_WARPAGE $bad_warp $TARGET_ASPECT $bad_asp $MAX_SKEW $bad_skew \
         $neg_jac $jac_min $jac_mean $warp_max $asp_p95 $saved_hm $saved_inp]
     if {$smooth_err ne ""} { append msg "\n- WARN: $smooth_err" }
@@ -1105,10 +1198,11 @@ proc ylh1_run {cfg_dict} {
 # =====================================================================
 proc ylh_launch_gui {} {
     variable ::ylh_cfg
-    if {![array exists ::ylh_cfg]} {
-        array set ::ylh_cfg [ylh_default_params]
+    # fill keys that a previous run in this HyperMesh session did not have yet
+    foreach {k v} [ylh_default_params] {
+        if {![info exists ::ylh_cfg($k)]} { set ::ylh_cfg($k) $v }
     }
-    set ::ylh_cfg(elem_size) "2.0"
+    set ::ylh_cfg(elem_size) $::YLH_ELEM_SIZE
 
     catch { destroy .ylhex2 }
     set w [toplevel .ylhex2]
@@ -1181,6 +1275,12 @@ proc ylh_launch_gui {} {
     grid $f3.c2 -row 2 -column 0 -columnspan 6 -sticky w -padx 4 -pady 1
     grid $f3.c3 -row 3 -column 0 -columnspan 6 -sticky w -padx 4 -pady 1
     grid $f3.c4 -row 4 -column 0 -columnspan 6 -sticky w -padx 4 -pady 1
+    checkbutton $f3.c5 -text "Defeature narrow CAD faces before SolidMap (fixes thin hex layers / aspect)" -variable ::ylh_cfg(defeature)
+    label $f3.ldw -text "narrower than (mm):"
+    entry $f3.edw -textvariable ::ylh_cfg(defeature_width) -width 6
+    grid $f3.c5  -row 5 -column 0 -columnspan 4 -sticky w -padx 4 -pady 1
+    grid $f3.ldw -row 5 -column 4 -sticky e -padx 2
+    grid $f3.edw -row 5 -column 5 -sticky w -padx 2
 
     # 4. Optional Output
     set f4 [labelframe $w.f4 -text " 4. Optional Save / Export " -padx 8 -pady 6]
@@ -1220,7 +1320,7 @@ proc ylh_launch_gui {} {
 
     if {$::ylh_gui_action ne "run"} { return }
 
-    foreach {k lbl} {feature_angle "Feature Angle" min_len_factor "Min Len Factor" min_jac "Min Jacobian" max_warp "Max Warpage" aspect "Max Aspect" max_skew "Max Skew" smooth_passes "Smooth Passes"} {
+    foreach {k lbl} {feature_angle "Feature Angle" min_len_factor "Min Len Factor" min_jac "Min Jacobian" max_warp "Max Warpage" aspect "Max Aspect" max_skew "Max Skew" smooth_passes "Smooth Passes" defeature_width "Defeature Width"} {
         if {![string is double -strict $::ylh_cfg($k)]} {
             tk_messageBox -icon error -title "YL HEX V2" -message "Invalid number for $lbl: '$::ylh_cfg($k)'"
             return
