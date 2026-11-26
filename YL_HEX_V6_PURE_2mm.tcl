@@ -26,6 +26,9 @@
 #     7) GUI: pick the ELEMENT (Hexa / Tetra) first, then the DIMENSION (2D / 3D):
 #          Hexa  + 2D = quad skin      Hexa  + 3D = hex volume (Multi-Solid Map)
 #          Tetra + 2D = tria skin      Tetra + 3D = tet volume (tria shell -> tetmesh)
+#     8) Element presets: clicking Hexa / Tetra loads that element's criteria
+#        (ylh6_family_defaults). Values typed for one element are remembered when
+#        switching; 'Reset to ... defaults' restores the preset.
 #
 #   Run inside HyperMesh 2019:
 #     File -> Run -> Tcl/Tk Script -> Select YL_HEX_V6_PURE_2mm.tcl
@@ -40,6 +43,8 @@ proc ylh6_default_params {} {
         quad_mode         "quads_only" \
         select_mode       "all"        \
         target_aspect     5.0          \
+        min_angle         45.0         \
+        max_angle         135.0        \
         min_jac           0.50         \
         max_warp          15.0         \
         max_skew          60.0         \
@@ -65,6 +70,23 @@ proc ylh6_default_params {} {
         out_dir           "C:/work/mesh_hex" \
         out_name          "model_PUREHEX_2mm" \
     ]
+}
+
+# Per-element presets (loaded when Hexa / Tetra is clicked in the GUI).
+#   Shared criteria (aspect, jacobian, feature angle, sliver edge, relax passes)
+#   are the same standard values for both; what differs is the face-angle window
+#   (quad faces 45-135 / tria faces 20-120), the quad-only repairs, and the
+#   tetra-only criteria and element type.
+proc ylh6_family_defaults {fam} {
+    if {$fam eq "tet"} {
+        return [list target_aspect 5.0 min_jac 0.50 max_warp 15.0 feature_angle 25.0 sliver_edge_max 0.80 \
+            smooth_passes 8 local_size_1 1.2 min_angle 20.0 max_angle 120.0 \
+            do_zipper 1 do_tria_merge 0 do_smooth 1 do_local_remesh 0 patch_holes 1 \
+            tet_collapse_min 0.20 tet_vskew_max 0.80 tet_elem_type C3D10MH]
+    }
+    return [list target_aspect 5.0 min_jac 0.50 max_warp 15.0 feature_angle 25.0 sliver_edge_max 0.80 \
+        smooth_passes 8 local_size_1 1.2 min_angle 45.0 max_angle 135.0 \
+        do_zipper 1 do_tria_merge 1 do_smooth 1 do_local_remesh 1 patch_holes 1 elem_type C3D8H]
 }
 
 # =====================================================================
@@ -992,8 +1014,8 @@ proc ylh6_wedge_for_hex {hex_type} {
     }
 }
 
-# Tria shell angles: {min_angle max_angle n_below_20 n_above_120}
-proc ylh6_tria_angles {} {
+# Tria shell angles: {min_angle max_angle n_below_lo n_above_hi}
+proc ylh6_tria_angles {{lo 20.0} {hi 120.0}} {
     *clearmark elems 1
     catch { *createmark elems 1 "by config" tria3 }
     set eids [hm_getmark elems 1]
@@ -1013,9 +1035,42 @@ proc ylh6_tria_angles {} {
         set A1 [expr {acos(max(-1.0, min(1.0, ($lb*$lb + $lc*$lc - $la*$la) / (2.0*$lb*$lc)))) * $rad}]
         set A2 [expr {acos(max(-1.0, min(1.0, ($la*$la + $lc*$lc - $lb*$lb) / (2.0*$la*$lc)))) * $rad}]
         set A3 [expr {180.0 - $A1 - $A2}]
-        set lo [expr {min($A1,$A2,$A3)}]; set hi [expr {max($A1,$A2,$A3)}]
-        if {$lo < $amin} { set amin $lo }; if {$hi > $amax} { set amax $hi }
-        if {$lo < 20.0} { incr nlo }; if {$hi > 120.0} { incr nhi }
+        set lo_e [expr {min($A1,$A2,$A3)}]; set hi_e [expr {max($A1,$A2,$A3)}]
+        if {$lo_e < $amin} { set amin $lo_e }; if {$hi_e > $amax} { set amax $hi_e }
+        if {$lo_e < $lo} { incr nlo }; if {$hi_e > $hi} { incr nhi }
+    }
+    if {[llength $eids] == 0} { return [list 0.0 0.0 0 0] }
+    return [list $amin $amax $nlo $nhi]
+}
+
+# Quad corner angles (3D, angle between the two edges at each corner): {min max n_below_lo n_above_hi}
+proc ylh6_quad_angles {{lo 45.0} {hi 135.0}} {
+    *clearmark elems 1
+    catch { *createmark elems 1 "by config" quad4 }
+    set eids [hm_getmark elems 1]
+    *clearmark elems 1
+    if {[llength $eids] == 0} { return [list 0.0 0.0 0 0] }
+    set rad [expr {180.0 / acos(-1.0)}]
+    set amin 180.0; set amax 0.0; set nlo 0; set nhi 0
+    array set XYZ {}
+    foreach e $eids {
+        set P {}
+        foreach n [lrange [hm_nodelist $e] 0 3] {
+            if {![info exists XYZ($n)]} { set XYZ($n) [lindex [hm_nodevalue $n] 0] }
+            lappend P $XYZ($n)
+        }
+        set lo_e 180.0; set hi_e 0.0
+        foreach i {0 1 2 3} {
+            set o [lindex $P $i]
+            set a [hqc6::sub [lindex $P [expr {($i + 1) % 4}]] $o]
+            set b [hqc6::sub [lindex $P [expr {($i + 3) % 4}]] $o]
+            set la [hqc6::len $a]; set lb [hqc6::len $b]
+            if {$la < 1e-12 || $lb < 1e-12} { set lo_e 0.0; set hi_e 180.0; break }
+            set ang [expr {acos(max(-1.0, min(1.0, [hqc6::dot $a $b] / ($la * $lb)))) * $rad}]
+            if {$ang < $lo_e} { set lo_e $ang }; if {$ang > $hi_e} { set hi_e $ang }
+        }
+        if {$lo_e < $amin} { set amin $lo_e }; if {$hi_e > $amax} { set amax $hi_e }
+        if {$lo_e < $lo} { incr nlo }; if {$hi_e > $hi} { incr nhi }
     }
     return [list $amin $amax $nlo $nhi]
 }
@@ -1114,6 +1169,8 @@ proc ylh6_run_2d {cfg_dict} {
     set SAVE_HM         [dict get $cfg_dict save_hm]
     set OUT_DIR         [dict get $cfg_dict out_dir]
     set OUT_NAME        [dict get $cfg_dict out_name]
+    set MIN_ANGLE       [expr {[dict exists $cfg_dict min_angle] ? double([dict get $cfg_dict min_angle]) : 45.0}]
+    set MAX_ANGLE       [expr {[dict exists $cfg_dict max_angle] ? double([dict get $cfg_dict max_angle]) : 135.0}]
 
     # STRICT Pure-Quad type = 4 ('quads only') everywhere!
     set am_type 4
@@ -1240,6 +1297,7 @@ proc ylh6_run_2d {cfg_dict} {
     set n_quad   [ylh6_count_elems quad4]
     set n_tria   [ylh6_count_elems tria3]
     set tria_pct [expr {($n_quad + $n_tria) > 0 ? 100.0 * $n_tria / ($n_quad + $n_tria) : 0.0}]
+    lassign [ylh6_quad_angles $MIN_ANGLE $MAX_ANGLE] qa_min qa_max qa_lo qa_hi
     set free_e   [ylh6_edges_2d 0]
     set t_e      [ylh6_edges_2d 1]
 
@@ -1266,12 +1324,12 @@ proc ylh6_run_2d {cfg_dict} {
         if {[catch { *writefile $out_hm 1 } write_err]} { set saved_txt "SAVE FAILED: $write_err" } else { set saved_txt $out_hm }
     }
 
-    set pass [expr {$mesh_err eq "" && $write_err eq "" && $n_quad > 0 && $n_tria == 0 && $n_unmeshed == 0 && $hm_asp == 0 && $free_e == 0 && $t_e == 0 ? 1 : 0}]
+    set pass [expr {$mesh_err eq "" && $write_err eq "" && $n_quad > 0 && $n_tria == 0 && $n_unmeshed == 0 && $hm_asp == 0 && $free_e == 0 && $t_e == 0 && $qa_lo == 0 && $qa_hi == 0 ? 1 : 0}]
     set status [expr {$pass ? "OK" : "CHECK"}]
-    set msg [format "YL_HEX_V6 PURE-QUAD (STRICT 2.0 mm) Finished  \[%s\]\n\n- Element Mode: QUADS ONLY (type=4 everywhere, zero mixed fallback)\n- MEASURED Edge Length (mm):\n    mean = %.2f mm  (p05=%.2f, p95=%.2f, min=%.2f, max=%.2f)\n- Elements: Quad4=%d, Tria3=%d (Tria=%.2f%%)\n- Holes: %d patched, %d still unmeshed\n- Targeted Repairs Applied:\n    Local Pure-Quad Remesh: %d surf(s) at %.1f mm\n    V-Tip Sliver Zipper Collapses: %d\n    Tria-Pair -> Quad4 Merges: %d\n    Quality-Driven Relaxed Nodes: %d\n- Aspect > %.1f:\n    RAW=%d (max=%.2f)  -->  FINAL=%d (max=%.2f)\n    HM Check Elements (2-d aspect > %.1f): %d failed\n- Skin Topology: Free Edges=%d, T-Edges=%d\n- HM Quality: BadJac(<%.2f)=%d, BadWarp(>%.1f)=%d, BadSkew(>%.1f)=%d\n- Saved HM: %s\n- Checkpoint Log: %s" \
+    set msg [format "YL_HEX_V6 PURE-QUAD (STRICT 2.0 mm) Finished  \[%s\]\n\n- Element Mode: QUADS ONLY (type=4 everywhere, zero mixed fallback)\n- MEASURED Edge Length (mm):\n    mean = %.2f mm  (p05=%.2f, p95=%.2f, min=%.2f, max=%.2f)\n- Elements: Quad4=%d, Tria3=%d (Tria=%.2f%%)\n- Quad angles: min=%.1f (%d below %.0f), max=%.1f (%d above %.0f)\n- Holes: %d patched, %d still unmeshed\n- Targeted Repairs Applied:\n    Local Pure-Quad Remesh: %d surf(s) at %.1f mm\n    V-Tip Sliver Zipper Collapses: %d\n    Tria-Pair -> Quad4 Merges: %d\n    Quality-Driven Relaxed Nodes: %d\n- Aspect > %.1f:\n    RAW=%d (max=%.2f)  -->  FINAL=%d (max=%.2f)\n    HM Check Elements (2-d aspect > %.1f): %d failed\n- Skin Topology: Free Edges=%d, T-Edges=%d\n- HM Quality: BadJac(<%.2f)=%d, BadWarp(>%.1f)=%d, BadSkew(>%.1f)=%d\n- Saved HM: %s\n- Checkpoint Log: %s" \
         $status \
         [dict get $FIN lmean] [dict get $FIN lp05] [dict get $FIN lp95] [dict get $FIN lmin] [dict get $FIN lmax] \
-        $n_quad $n_tria $tria_pct $n_patched $n_unmeshed \
+        $n_quad $n_tria $tria_pct $qa_min $qa_lo $MIN_ANGLE $qa_max $qa_hi $MAX_ANGLE $n_patched $n_unmeshed \
         $n_local_remeshed $LOCAL_SZ1 $n_zipped $n_merged $n_relaxed \
         $TARGET_ASPECT [dict get $RAW bad_asp] [dict get $RAW max_asp] [dict get $FIN bad_asp] [dict get $FIN max_asp] \
         $TARGET_ASPECT $hm_asp \
@@ -1520,6 +1578,8 @@ proc ylh6_run_tet {cfg_dict} {
     set OUT_NAME        [dict get $cfg_dict out_name]
     set MAX_SKEW        [expr {double([dict get $cfg_dict max_skew])}]
     set SHELL_ONLY      [expr {[dict exists $cfg_dict shell_only] && [dict get $cfg_dict shell_only]}]
+    set MIN_ANGLE       [expr {[dict exists $cfg_dict min_angle] ? double([dict get $cfg_dict min_angle]) : 20.0}]
+    set MAX_ANGLE       [expr {[dict exists $cfg_dict max_angle] ? double([dict get $cfg_dict max_angle]) : 120.0}]
     ylh6_ckpt "TET_START" "size=2.0mm type=$TET_TYPE select=$SELECT_MODE shell_only=$SHELL_ONLY"
 
     # 1. Surfaces forming the closed shell
@@ -1588,10 +1648,10 @@ proc ylh6_run_tet {cfg_dict} {
     set n_quad [ylh6_count_elems quad4]
     set free_e [ylh6_edges_2d 0]
     set t_e    [ylh6_edges_2d 1]
-    lassign [ylh6_tria_angles] ang_min ang_max ang_lo ang_hi
+    lassign [ylh6_tria_angles $MIN_ANGLE $MAX_ANGLE] ang_min ang_max ang_lo ang_hi
     ylh6_ckpt "TET_SHELL_READY" "tria=$n_tria quad=$n_quad free=$free_e tedge=$t_e minang=[format %.1f $ang_min]"
-    set shell_txt [format "tria3=%d, quad4=%d, unmeshed surfs=%d, free edges=%d, T-edges=%d\n    repairs: %d sliver collapses, %d nodes relaxed\n    tria angles: min=%.1f (%d below 20), max=%.1f (%d above 120)" \
-        $n_tria $n_quad $n_unmeshed $free_e $t_e $n_zipped $n_relaxed $ang_min $ang_lo $ang_max $ang_hi]
+    set shell_txt [format "tria3=%d, quad4=%d, unmeshed surfs=%d, free edges=%d, T-edges=%d\n    repairs: %d sliver collapses, %d nodes relaxed\n    tria angles: min=%.1f (%d below %.0f), max=%.1f (%d above %.0f)" \
+        $n_tria $n_quad $n_unmeshed $free_e $t_e $n_zipped $n_relaxed $ang_min $ang_lo $MIN_ANGLE $ang_max $ang_hi $MAX_ANGLE]
     # 2D TRIA SKIN (tetra preparation): report the shell and stop here - no tetmesh
     if {$SHELL_ONLY} {
         set FIN [ylh6_measure_2d $TARGET_ASPECT]
@@ -1734,10 +1794,32 @@ proc ylh6_gui_mode {} {
     return [expr {$dim eq "3d" ? "hex" : "quad"}]
 }
 
+# 'Reset to Hexa/Tetra defaults': reload the preset of the selected element
+proc ylh6_gui_reset_family {} {
+    set fam $::ylh6_cfg(family)
+    foreach {k v} [ylh6_family_defaults $fam] {
+        set ::ylh6_cfg($k) $v
+        unset -nocomplain ::ylh6_fam_mem($fam,$k)
+    }
+}
+
 # Show what will run and grey out the fields that this combination does not use
 proc ylh6_gui_mode_update {args} {
     set w .ylhex6
     if {![winfo exists $w]} { return }
+    set fam $::ylh6_cfg(family)
+    if {[info exists ::ylh6_loaded_family] && $::ylh6_loaded_family ne $fam} {
+        # remember what was typed for the element we leave, load the element we enter
+        set old $::ylh6_loaded_family
+        foreach {k v} [ylh6_family_defaults $old] { set ::ylh6_fam_mem($old,$k) $::ylh6_cfg($k) }
+        foreach {k v} [ylh6_family_defaults $fam] {
+            if {[info exists ::ylh6_fam_mem($fam,$k)]} { set ::ylh6_cfg($k) $::ylh6_fam_mem($fam,$k) } else { set ::ylh6_cfg($k) $v }
+        }
+    }
+    set ::ylh6_loaded_family $fam
+    set fname [expr {$fam eq "tet" ? "Tetra" : "Hexa"}]
+    catch { $w.f2 configure -text " 2. Quality Criteria - [string toupper $fname] set (greyed = not used in this mode) " }
+    catch { $w.f2.brst configure -text "Reset to $fname defaults" }
     set m [ylh6_gui_mode]
     set ::ylh6_cfg(mode) $m
     set desc [dict get {
@@ -1756,6 +1838,7 @@ proc ylh6_gui_mode_update {args} {
         $w.f2.esl {quad tria tet}  $w.f2.el1 {quad}  $w.f2.eas {quad hex tria tet} \
         $w.f2.ejc {quad hex tet}   $w.f2.ewp {quad hex}  $w.f2.efa {quad tria tet} \
         $w.f2.esm {quad hex tria tet}  $w.f2.oet {hex}  $w.f2.etc {tet}  $w.f2.evs {tet}  $w.f2.ott {tet} \
+        $w.f2.ean {quad tria tet}  $w.f2.eax {quad tria tet} \
         $w.f3.c1 {quad tria tet}  $w.f3.c2 {quad}  $w.f3.c3 {quad hex tria tet}  $w.f3.c4 {quad}  $w.f3.c5 {quad tria tet}] {
         catch { $wid configure -state [expr {[lsearch -exact $used $m] >= 0 ? "normal" : "disabled"}] }
     }
@@ -1770,10 +1853,15 @@ proc ylh6_launch_gui {} {
             default { set ::ylh6_cfg(family) hex; set ::ylh6_cfg(dim) 2d }
         }
     }
+    set fam_now [expr {[info exists ::ylh6_cfg(family)] ? $::ylh6_cfg(family) : "hex"}]
+    foreach {k v} [ylh6_family_defaults $fam_now] {
+        if {![info exists ::ylh6_cfg($k)]} { set ::ylh6_cfg($k) $v }
+    }
     foreach {k v} [ylh6_default_params] {
         if {![info exists ::ylh6_cfg($k)]} { set ::ylh6_cfg($k) $v }
     }
     set ::ylh6_cfg(elem_size) "2.0"
+    set ::ylh6_loaded_family $::ylh6_cfg(family)
 
     catch { destroy .ylhex6 }
     set w [toplevel .ylhex6]
@@ -1834,6 +1922,13 @@ proc ylh6_launch_gui {} {
     eval tk_optionMenu $f2.ott ::ylh6_cfg(tet_elem_type) C3D10MH C3D10H C3D10M C3D10 C3D4H C3D4
     grid $f2.ltc $f2.etc $f2.lvs $f2.evs $f2.ltt $f2.ott -sticky w -padx 4 -pady 3
 
+    label $f2.lan -text "Min Face Angle:"
+    entry $f2.ean -textvariable ::ylh6_cfg(min_angle) -width 8
+    label $f2.lax -text "Max Face Angle:"
+    entry $f2.eax -textvariable ::ylh6_cfg(max_angle) -width 8
+    button $f2.brst -text "Reset to Hexa defaults" -command ylh6_gui_reset_family
+    grid $f2.lan $f2.ean $f2.lax $f2.eax $f2.brst - -sticky w -padx 4 -pady 3
+
     set f3 [labelframe $w.f3 -text " 3. Mesh Repair (greyed = not used in this mode) " -padx 8 -pady 6]
     pack $f3 -fill x -padx 10 -pady 5
     checkbutton $f3.c1 -text "Zipper-collapse V-tip sliver strips (fixes grey tapering V-wedges)" -variable ::ylh6_cfg(do_zipper)
@@ -1883,7 +1978,7 @@ proc ylh6_launch_gui {} {
 
     if {$::ylh6_gui_action ne "run"} { return }
 
-    foreach {k lbl} {sliver_edge_max "Sliver Edge Max" local_size_1 "Local Remesh" target_aspect "Aspect Limit" min_jac "Min Jacobian" max_warp "Max Warpage" feature_angle "Feature Angle" smooth_passes "Relax Passes" tet_collapse_min "Tet Collapse Min" tet_vskew_max "Vol Skew Max"} {
+    foreach {k lbl} {sliver_edge_max "Sliver Edge Max" local_size_1 "Local Remesh" target_aspect "Aspect Limit" min_jac "Min Jacobian" max_warp "Max Warpage" feature_angle "Feature Angle" smooth_passes "Relax Passes" tet_collapse_min "Tet Collapse Min" tet_vskew_max "Vol Skew Max" min_angle "Min Face Angle" max_angle "Max Face Angle"} {
         if {![string is double -strict $::ylh6_cfg($k)]} {
             tk_messageBox -icon error -title "YL HEX V6" -message "Invalid number for $lbl: '$::ylh6_cfg($k)'"
             return
