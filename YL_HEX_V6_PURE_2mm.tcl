@@ -23,6 +23,9 @@
 #        -> tetmesh -> Abaqus tetra type (default C3D10MH) -> tetra quality
 #        (tet collapse, volumetric skew, aspect, jacobian). Needs only a CLOSED
 #        shell of surfaces - no solid entity required.
+#     7) GUI: pick the ELEMENT (Hexa / Tetra) first, then the DIMENSION (2D / 3D):
+#          Hexa  + 2D = quad skin      Hexa  + 3D = hex volume (Multi-Solid Map)
+#          Tetra + 2D = tria skin      Tetra + 3D = tet volume (tria shell -> tetmesh)
 #
 #   Run inside HyperMesh 2019:
 #     File -> Run -> Tcl/Tk Script -> Select YL_HEX_V6_PURE_2mm.tcl
@@ -31,6 +34,8 @@
 proc ylh6_default_params {} {
     return [list \
         elem_size         2.0          \
+        family            "hex"        \
+        dim               "2d"         \
         mode              "quad"       \
         quad_mode         "quads_only" \
         select_mode       "all"        \
@@ -1513,7 +1518,9 @@ proc ylh6_run_tet {cfg_dict} {
     set EXPORT_INP      [dict get $cfg_dict export_inp]
     set OUT_DIR         [dict get $cfg_dict out_dir]
     set OUT_NAME        [dict get $cfg_dict out_name]
-    ylh6_ckpt "TET_START" "size=2.0mm type=$TET_TYPE select=$SELECT_MODE"
+    set MAX_SKEW        [expr {double([dict get $cfg_dict max_skew])}]
+    set SHELL_ONLY      [expr {[dict exists $cfg_dict shell_only] && [dict get $cfg_dict shell_only]}]
+    ylh6_ckpt "TET_START" "size=2.0mm type=$TET_TYPE select=$SELECT_MODE shell_only=$SHELL_ONLY"
 
     # 1. Surfaces forming the closed shell
     *clearmark surfs 1
@@ -1585,6 +1592,41 @@ proc ylh6_run_tet {cfg_dict} {
     ylh6_ckpt "TET_SHELL_READY" "tria=$n_tria quad=$n_quad free=$free_e tedge=$t_e minang=[format %.1f $ang_min]"
     set shell_txt [format "tria3=%d, quad4=%d, unmeshed surfs=%d, free edges=%d, T-edges=%d\n    repairs: %d sliver collapses, %d nodes relaxed\n    tria angles: min=%.1f (%d below 20), max=%.1f (%d above 120)" \
         $n_tria $n_quad $n_unmeshed $free_e $t_e $n_zipped $n_relaxed $ang_min $ang_lo $ang_max $ang_hi]
+    # 2D TRIA SKIN (tetra preparation): report the shell and stop here - no tetmesh
+    if {$SHELL_ONLY} {
+        set FIN [ylh6_measure_2d $TARGET_ASPECT]
+        set hm_asp -1; set hm_skew -1
+        foreach {var cmd lim lbl} [list \
+            hm_asp  *elementtestaspect $TARGET_ASPECT "2D Aspect" \
+            hm_skew *elementtestskew   $MAX_SKEW      "2D Skew"] {
+            *clearmark elems 1; *clearmark elems 2
+            catch { *createmark elems 1 "by config" tria3 quad4 }
+            if {![catch { $cmd elems 1 $lim 2 2 0 $lbl }]} { set $var [llength [hm_getmark elems 2]] }
+            *clearmark elems 1; *clearmark elems 2
+        }
+        set closed [expr {$n_tria > 0 && $n_quad == 0 && $free_e == 0 && $t_e == 0}]
+        set saved_hm "(not saved)"
+        if {$SAVE_HM && $OUT_DIR ne ""} {
+            file mkdir $OUT_DIR
+            set stem [expr {$OUT_NAME ne "" ? $OUT_NAME : "YL_V6_TRIASKIN_2mm"}]
+            set out_hm [file join $OUT_DIR "${stem}.hm"]
+            catch { hm_answernext yes }
+            if {![catch { *writefile $out_hm 1 }]} { set saved_hm $out_hm }
+        }
+        set pass [expr {$mesh_err eq "" && $closed && $n_unmeshed == 0 && [dict get $FIN bad_asp] == 0 \
+            && $hm_asp <= 0 && $ang_lo == 0 && $ang_hi == 0 ? 1 : 0}]
+        set status [expr {$pass ? "OK" : "CHECK"}]
+        set na {x { expr {$x < 0 ? "n/a" : $x} }}
+        set msg [format "YL_HEX_V6 2D TRIA SKIN (STRICT 2.0 mm, tetra preparation) Finished  \[%s\]\n\n- Element Mode: TRIAS (automesh type 0) - surface skin only, no tetra created\n- MEASURED Edge Length: mean=%.2f mm (p05=%.2f, p95=%.2f, min=%.2f, max=%.2f)\n- Tria shell: %s\n- Aspect > %.1f: independent=%d (max=%.2f), HM check=%s\n- HM Skew > %.1f: %s\n- Ready for 3D Tetra (closed shell, trias only): %s\n- Saved HM: %s\n- Checkpoint Log: %s" \
+            $status [dict get $FIN lmean] [dict get $FIN lp05] [dict get $FIN lp95] [dict get $FIN lmin] [dict get $FIN lmax] \
+            $shell_txt $TARGET_ASPECT [dict get $FIN bad_asp] [dict get $FIN max_asp] [apply $na $hm_asp] \
+            $MAX_SKEW [apply $na $hm_skew] [expr {$closed ? "YES" : "NO"}] $saved_hm $::YLH6_CKPT_FILE]
+        if {$mesh_err ne ""} { append msg "\n\n*** $mesh_err" }
+        catch { set fh [open $::YLH6_REPORT_FILE w]; puts $fh $msg; close $fh }
+        ylh6_ckpt "TRIA_SKIN_FINISH" "status=$status tria=$n_tria free=$free_e tedge=$t_e"
+        return [dict create status $status msg $msg]
+    }
+
     if {$n_tria == 0 || $free_e > 0 || $t_e > 0} {
         set m "YL_HEX_V6 TETRA (STRICT 2.0 mm) stopped before tetmesh  \[CHECK\]\n\n- Tria shell: $shell_txt\n\nTetmesh needs a CLOSED tria shell (free edges = 0, T-edges = 0).\nThe shell is kept so you can inspect it (Tool > edges > free edges).\nFix the gaps (Geom > autocleanup / edge edit > equivalence) and run again."
         if {$mesh_err ne ""} { append m "\n\n*** $mesh_err" }
@@ -1684,23 +1726,50 @@ proc ylh6_run_tet {cfg_dict} {
 # =====================================================================
 # MODULE 5 : GUI (Fresh ::ylh6_cfg)
 # =====================================================================
-# Grey out the fields that the selected mode does not use
+# Element + dimension -> engine:  hex+2d=quad  hex+3d=hex  tet+2d=tria  tet+3d=tet
+proc ylh6_gui_mode {} {
+    set fam [expr {[info exists ::ylh6_cfg(family)] ? $::ylh6_cfg(family) : "hex"}]
+    set dim [expr {[info exists ::ylh6_cfg(dim)]    ? $::ylh6_cfg(dim)    : "2d"}]
+    if {$fam eq "tet"} { return [expr {$dim eq "3d" ? "tet" : "tria"}] }
+    return [expr {$dim eq "3d" ? "hex" : "quad"}]
+}
+
+# Show what will run and grey out the fields that this combination does not use
 proc ylh6_gui_mode_update {args} {
     set w .ylhex6
     if {![winfo exists $w]} { return }
-    set m $::ylh6_cfg(mode)
-    set on_tet   [expr {$m eq "tet"  ? "normal" : "disabled"}]
-    set on_hex   [expr {$m eq "hex"  ? "normal" : "disabled"}]
-    set on_quad  [expr {$m eq "quad" ? "normal" : "disabled"}]
-    set not_tet  [expr {$m ne "tet"  ? "normal" : "disabled"}]
-    foreach {wid st} [list $w.f2.ewp $not_tet $w.f2.el1 $on_quad $w.f2.oet $on_hex \
-                           $w.f2.etc $on_tet $w.f2.evs $on_tet $w.f2.ott $on_tet \
-                           $w.f3.c2 $on_quad $w.f3.c4 $on_quad] {
-        catch { $wid configure -state $st }
+    set m [ylh6_gui_mode]
+    set ::ylh6_cfg(mode) $m
+    set desc [dict get {
+        quad "2D Quad skin   (surface mesh for HEXA preparation, quads only)"
+        hex  "3D Hexa volume   (Multi-Solid Map - needs mappable solids)"
+        tria "2D Tria skin   (closed surface mesh for TETRA preparation)"
+        tet  "3D Tetra volume   (tria shell -> tetmesh - no solid needed)"} $m]
+    catch { $w.f1.run configure -text $desc }
+    # default output name follows the mode (a name typed by the user is kept)
+    set dflt [dict get {quad model_QUADSKIN_2mm hex model_PUREHEX_2mm tria model_TRIASKIN_2mm tet model_TETRA_2mm} $m]
+    if {[lsearch -exact {"" model_PUREHEX_2mm model_QUADSKIN_2mm model_TRIASKIN_2mm model_TETRA_2mm} $::ylh6_cfg(out_name)] >= 0} {
+        set ::ylh6_cfg(out_name) $dflt
+    }
+    # widget -> modes in which it is used
+    foreach {wid used} [list \
+        $w.f2.esl {quad tria tet}  $w.f2.el1 {quad}  $w.f2.eas {quad hex tria tet} \
+        $w.f2.ejc {quad hex tet}   $w.f2.ewp {quad hex}  $w.f2.efa {quad tria tet} \
+        $w.f2.esm {quad hex tria tet}  $w.f2.oet {hex}  $w.f2.etc {tet}  $w.f2.evs {tet}  $w.f2.ott {tet} \
+        $w.f3.c1 {quad tria tet}  $w.f3.c2 {quad}  $w.f3.c3 {quad hex tria tet}  $w.f3.c4 {quad}  $w.f3.c5 {quad tria tet}] {
+        catch { $wid configure -state [expr {[lsearch -exact $used $m] >= 0 ? "normal" : "disabled"}] }
     }
 }
 
 proc ylh6_launch_gui {} {
+    if {![info exists ::ylh6_cfg(family)] && [info exists ::ylh6_cfg(mode)]} {
+        switch -- $::ylh6_cfg(mode) {
+            hex     { set ::ylh6_cfg(family) hex; set ::ylh6_cfg(dim) 3d }
+            tet     { set ::ylh6_cfg(family) tet; set ::ylh6_cfg(dim) 3d }
+            tria    { set ::ylh6_cfg(family) tet; set ::ylh6_cfg(dim) 2d }
+            default { set ::ylh6_cfg(family) hex; set ::ylh6_cfg(dim) 2d }
+        }
+    }
     foreach {k v} [ylh6_default_params] {
         if {![info exists ::ylh6_cfg($k)]} { set ::ylh6_cfg($k) $v }
     }
@@ -1708,22 +1777,26 @@ proc ylh6_launch_gui {} {
 
     catch { destroy .ylhex6 }
     set w [toplevel .ylhex6]
-    wm title $w "YL Mesh V6 PURE (STRICT 2.0 mm - Quad / Hexa / Tetra)"
+    wm title $w "YL Mesh V6 PURE (STRICT 2.0 mm - Hexa / Tetra, 2D / 3D)"
     wm resizable $w 0 0
 
-    set f1 [labelframe $w.f1 -text " 1. Mode & Target (STRICT 2.0 mm, Quads-Only / Pure Hexa) " -padx 8 -pady 6]
+    set f1 [labelframe $w.f1 -text " 1. Element & Dimension (STRICT 2.0 mm) " -padx 8 -pady 6]
     pack $f1 -fill x -padx 10 -pady 5
-    radiobutton $f1.m1 -text "2D Pure-Quad (Hexa Skin, type=4 + V-Tip Fix)" -variable ::ylh6_cfg(mode) -value "quad"
-    radiobutton $f1.m2 -text "3D Pure-Hexa (Multi-Solid Map, flags=131076)" -variable ::ylh6_cfg(mode) -value "hex"
-    radiobutton $f1.m3 -text "3D Tetra (2.0 mm tria shell -> tetmesh, no solid needed)" -variable ::ylh6_cfg(mode) -value "tet"
-    grid $f1.m1 -row 0 -column 0 -sticky w -padx 4
-    grid $f1.m2 -row 0 -column 1 -sticky w -padx 12
-    grid $f1.m3 -row 1 -column 1 -sticky w -padx 12
-
+    label $f1.lfam -text "Element:"
+    radiobutton $f1.fh -text "Hexa   (quad skin / hex volume)"  -variable ::ylh6_cfg(family) -value "hex"
+    radiobutton $f1.ft -text "Tetra   (tria skin / tet volume)" -variable ::ylh6_cfg(family) -value "tet"
+    label $f1.ldim -text "Dimension:"
+    radiobutton $f1.d2 -text "2D   (surface skin only)" -variable ::ylh6_cfg(dim) -value "2d"
+    radiobutton $f1.d3 -text "3D   (volume mesh)"       -variable ::ylh6_cfg(dim) -value "3d"
+    label $f1.lrun -text "Will run:"
+    label $f1.run -text "" -foreground "#1a4f9c" -anchor w
+    label $f1.ltg -text "Target:"
     radiobutton $f1.s1 -text "All Solids / Surfaces" -variable ::ylh6_cfg(select_mode) -value "all"
     radiobutton $f1.s2 -text "Pick Manually"         -variable ::ylh6_cfg(select_mode) -value "pick"
-    grid $f1.s1 -row 2 -column 0 -sticky w -padx 4 -pady 2
-    grid $f1.s2 -row 2 -column 1 -sticky w -padx 12 -pady 2
+    grid $f1.lfam $f1.fh $f1.ft -sticky w -padx 4 -pady 2
+    grid $f1.ldim $f1.d2 $f1.d3 -sticky w -padx 4 -pady 2
+    grid $f1.lrun $f1.run -     -sticky w -padx 4 -pady 2
+    grid $f1.ltg  $f1.s1 $f1.s2 -sticky w -padx 4 -pady 2
 
     set f2 [labelframe $w.f2 -text " 2. Sliver & Quality Criteria (greyed = not used in this mode) " -padx 8 -pady 6]
     pack $f2 -fill x -padx 10 -pady 5
@@ -1761,13 +1834,13 @@ proc ylh6_launch_gui {} {
     eval tk_optionMenu $f2.ott ::ylh6_cfg(tet_elem_type) C3D10MH C3D10H C3D10M C3D10 C3D4H C3D4
     grid $f2.ltc $f2.etc $f2.lvs $f2.evs $f2.ltt $f2.ott -sticky w -padx 4 -pady 3
 
-    set f3 [labelframe $w.f3 -text " 3. Targeted Pure-Quad Fixes (Zero CAD B-Rep Crash) " -padx 8 -pady 6]
+    set f3 [labelframe $w.f3 -text " 3. Mesh Repair (greyed = not used in this mode) " -padx 8 -pady 6]
     pack $f3 -fill x -padx 10 -pady 5
     checkbutton $f3.c1 -text "Zipper-collapse V-tip sliver strips (fixes grey tapering V-wedges)" -variable ::ylh6_cfg(do_zipper)
-    checkbutton $f3.c2 -text "Merge adjacent Tria3 pairs into Quad4 (eliminates mixed triangles)" -variable ::ylh6_cfg(do_tria_merge)
-    checkbutton $f3.c3 -text "Quality-driven quad relaxation (fixes white kite/diamond quads)"     -variable ::ylh6_cfg(do_smooth)
-    checkbutton $f3.c4 -text "Local pure-quad remesh on bad-aspect surfaces (type=4 only)"          -variable ::ylh6_cfg(do_local_remesh)
-    checkbutton $f3.c5 -text "Auto-patch unmeshed holes (type=4 quads_only) / 2D fallback"          -variable ::ylh6_cfg(patch_holes)
+    checkbutton $f3.c2 -text "Merge adjacent Tria3 pairs into Quad4 (quad skin only)"                -variable ::ylh6_cfg(do_tria_merge)
+    checkbutton $f3.c3 -text "Quality-driven node relaxation (2D) / interior hex smoothing (3D Hexa)" -variable ::ylh6_cfg(do_smooth)
+    checkbutton $f3.c4 -text "Local pure-quad remesh on bad-aspect surfaces (quad skin only)"        -variable ::ylh6_cfg(do_local_remesh)
+    checkbutton $f3.c5 -text "Auto-patch unmeshed surfaces (finer size, same element type)"          -variable ::ylh6_cfg(patch_holes)
     grid $f3.c1 -row 0 -column 0 -sticky w -padx 4 -pady 1
     grid $f3.c2 -row 1 -column 0 -sticky w -padx 4 -pady 1
     grid $f3.c3 -row 2 -column 0 -sticky w -padx 4 -pady 1
@@ -1801,10 +1874,12 @@ proc ylh6_launch_gui {} {
     pack $fb.run -side right -padx 4
 
     wm protocol $w WM_DELETE_WINDOW { set ::ylh6_gui_action "cancel"; destroy .ylhex6 }
-    trace add variable ::ylh6_cfg(mode) write ylh6_gui_mode_update
+    trace add variable ::ylh6_cfg(family) write ylh6_gui_mode_update
+    trace add variable ::ylh6_cfg(dim)    write ylh6_gui_mode_update
     ylh6_gui_mode_update
     tkwait window $w
-    trace remove variable ::ylh6_cfg(mode) write ylh6_gui_mode_update
+    trace remove variable ::ylh6_cfg(family) write ylh6_gui_mode_update
+    trace remove variable ::ylh6_cfg(dim)    write ylh6_gui_mode_update
 
     if {$::ylh6_gui_action ne "run"} { return }
 
@@ -1815,13 +1890,13 @@ proc ylh6_launch_gui {} {
         }
     }
 
+    set ::ylh6_cfg(mode) [ylh6_gui_mode]
     set cfg_dict [array get ::ylh6_cfg]
-    if {$::ylh6_cfg(mode) eq "hex"} {
-        set res [ylh6_run_3d $cfg_dict]
-    } elseif {$::ylh6_cfg(mode) eq "tet"} {
-        set res [ylh6_run_tet $cfg_dict]
-    } else {
-        set res [ylh6_run_2d $cfg_dict]
+    switch -- $::ylh6_cfg(mode) {
+        hex     { set res [ylh6_run_3d $cfg_dict] }
+        tet     { set res [ylh6_run_tet $cfg_dict] }
+        tria    { dict set cfg_dict shell_only 1; set res [ylh6_run_tet $cfg_dict] }
+        default { set res [ylh6_run_2d $cfg_dict] }
     }
 
     set icon [expr {[dict get $res status] eq "OK" ? "info" : "warning"}]
