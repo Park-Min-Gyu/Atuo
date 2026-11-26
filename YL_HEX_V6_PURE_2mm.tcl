@@ -19,6 +19,11 @@
 #          - Zero *edgesmarksuppress / *verticesmarksuppress
 #          - Real-time flush+close checkpoint log: C:/Temp/YL_HEX_V6_logs/
 #
+#     6) 3D TETRA mode (added): 2.0 mm tria shell -> sliver collapse / relax
+#        -> tetmesh -> Abaqus tetra type (default C3D10MH) -> tetra quality
+#        (tet collapse, volumetric skew, aspect, jacobian). Needs only a CLOSED
+#        shell of surfaces - no solid entity required.
+#
 #   Run inside HyperMesh 2019:
 #     File -> Run -> Tcl/Tk Script -> Select YL_HEX_V6_PURE_2mm.tcl
 # =====================================================================
@@ -43,6 +48,9 @@ proc ylh6_default_params {} {
         smooth_passes     8            \
         patch_holes       1            \
         elem_type         "C3D8H"      \
+        tet_elem_type     "C3D10MH"    \
+        tet_collapse_min  0.20         \
+        tet_vskew_max     0.80         \
         sm_flags          "auto"       \
         delete_2d         1            \
         equiv_global      0            \
@@ -221,6 +229,42 @@ proc hqc6::quad_warp {p0 p1 p2 p3} {
         if {$ang > $w} { set w $ang }
     }
     return $w
+}
+
+# Tetra metrics: returns {vol6 collapse vol_skew lmin lmax lsum}
+#   vol6     : signed 6 x volume (sign = node ordering)
+#   collapse : HM tet collapse = min over 4 nodes of h / (1.24*sqrt(A_opposite)); equilateral = 1
+#   vol_skew : 1 - V / V(equilateral tet with the same circumradius); equilateral = 0
+proc hqc6::tet_metrics {p0 p1 p2 p3} {
+    set u [sub $p1 $p0]; set v [sub $p2 $p0]; set w [sub $p3 $p0]
+    set vol6 [dot [cross $u $v] $w]
+    set V [expr {abs($vol6) / 6.0}]
+    set col 1e9
+    foreach {a b c} [list $p1 $p2 $p3  $p0 $p2 $p3  $p0 $p1 $p3  $p0 $p1 $p2] {
+        set A [expr {0.5 * [len [cross [sub $b $a] [sub $c $a]]]}]
+        if {$A < 1e-14} { set col 0.0; break }
+        set cv [expr {(3.0 * $V / $A) / (1.24 * sqrt($A))}]
+        if {$cv < $col} { set col $cv }
+    }
+    set num {0.0 0.0 0.0}
+    foreach {s a b} [list [dot $u $u] $v $w  [dot $v $v] $w $u  [dot $w $w] $u $v] {
+        set c [cross $a $b]
+        set num [list [expr {[lindex $num 0] + $s*[lindex $c 0]}] [expr {[lindex $num 1] + $s*[lindex $c 1]}] [expr {[lindex $num 2] + $s*[lindex $c 2]}]]
+    }
+    if {abs($vol6) < 1e-14} {
+        set vsk 1.0
+    } else {
+        set R   [expr {[len $num] / (2.0 * abs($vol6))}]
+        set aeq [expr {$R * sqrt(8.0 / 3.0)}]
+        set vsk [expr {max(0.0, 1.0 - $V / ($aeq*$aeq*$aeq / (6.0*sqrt(2.0))))}]
+    }
+    set lmin 1e30; set lmax 0.0; set lsum 0.0
+    foreach {a b} [list $p0 $p1 $p0 $p2 $p0 $p3 $p1 $p2 $p1 $p3 $p2 $p3] {
+        set l [dist $a $b]
+        if {$l < $lmin} { set lmin $l }; if {$l > $lmax} { set lmax $l }
+        set lsum [expr {$lsum + $l}]
+    }
+    return [list $vol6 $col $vsk $lmin $lmax $lsum]
 }
 
 proc hqc6::elem_edges {nds} {
@@ -943,6 +987,78 @@ proc ylh6_wedge_for_hex {hex_type} {
     }
 }
 
+# Tria shell angles: {min_angle max_angle n_below_20 n_above_120}
+proc ylh6_tria_angles {} {
+    *clearmark elems 1
+    catch { *createmark elems 1 "by config" tria3 }
+    set eids [hm_getmark elems 1]
+    *clearmark elems 1
+    set rad [expr {180.0 / acos(-1.0)}]
+    set amin 180.0; set amax 0.0; set nlo 0; set nhi 0
+    array set XYZ {}
+    foreach e $eids {
+        set P {}
+        foreach n [lrange [hm_nodelist $e] 0 2] {
+            if {![info exists XYZ($n)]} { set XYZ($n) [lindex [hm_nodevalue $n] 0] }
+            lappend P $XYZ($n)
+        }
+        lassign $P a b c
+        set la [hqc6::dist $b $c]; set lb [hqc6::dist $a $c]; set lc [hqc6::dist $a $b]
+        if {$la < 1e-12 || $lb < 1e-12 || $lc < 1e-12} { set amin 0.0; incr nlo; continue }
+        set A1 [expr {acos(max(-1.0, min(1.0, ($lb*$lb + $lc*$lc - $la*$la) / (2.0*$lb*$lc)))) * $rad}]
+        set A2 [expr {acos(max(-1.0, min(1.0, ($la*$la + $lc*$lc - $lb*$lb) / (2.0*$la*$lc)))) * $rad}]
+        set A3 [expr {180.0 - $A1 - $A2}]
+        set lo [expr {min($A1,$A2,$A3)}]; set hi [expr {max($A1,$A2,$A3)}]
+        if {$lo < $amin} { set amin $lo }; if {$hi > $amax} { set amax $hi }
+        if {$lo < 20.0} { incr nlo }; if {$hi > 120.0} { incr nhi }
+    }
+    return [list $amin $amax $nlo $nhi]
+}
+
+# Independent tetra statistics (corner nodes 1-4, so tetra10 works too)
+proc ylh6_measure_tet {col_lim vsk_lim {maxn 300000}} {
+    *clearmark elems 1
+    catch { *createmark elems 1 "by config" tetra4 tetra10 }
+    set eids [hm_getmark elems 1]
+    *clearmark elems 1
+    set R [dict create n [llength $eids] col_min 0.0 col_mean 0.0 col_bad 0 vsk_max 0.0 vsk_bad 0 \
+        lmean 0.0 lp05 0.0 lp95 0.0 inverted 0]
+    if {[llength $eids] == 0} { return $R }
+    set step 1
+    if {[llength $eids] > $maxn} { set step [expr {int(ceil(double([llength $eids]) / $maxn))}] }
+    array set XYZ {}
+    set cmin 1e9; set csum 0.0; set cbad 0; set vmax 0.0; set vbad 0
+    set lm {}; set npos 0; set nneg 0; set ndeg 0; set n 0; set i 0
+    foreach e $eids {
+        if {$i % $step} { incr i; continue }
+        incr i
+        set nds [lrange [hm_nodelist $e] 0 3]
+        if {[llength $nds] < 4} { continue }
+        set P {}
+        foreach nd $nds {
+            if {![info exists XYZ($nd)]} { set XYZ($nd) [lindex [hm_nodevalue $nd] 0] }
+            lappend P $XYZ($nd)
+        }
+        lassign [hqc6::tet_metrics {*}$P] vol6 col vsk lmin lmax lsum
+        if {abs($vol6) < 1e-12} { incr ndeg } elseif {$vol6 > 0} { incr npos } else { incr nneg }
+        if {$col < $cmin} { set cmin $col }
+        set csum [expr {$csum + $col}]
+        if {$col < $col_lim} { incr cbad }
+        if {$vsk > $vmax} { set vmax $vsk }
+        if {$vsk > $vsk_lim} { incr vbad }
+        lappend lm [expr {$lsum / 6.0}]
+        incr n
+    }
+    if {$n == 0} { return $R }
+    set lm [lsort -real $lm]
+    set sum 0.0; foreach x $lm { set sum [expr {$sum + $x}] }
+    # inverted = tets whose orientation disagrees with the majority (+ degenerate ones)
+    return [dict create n [llength $eids] col_min $cmin col_mean [expr {$csum / $n}] col_bad $cbad \
+        vsk_max $vmax vsk_bad $vbad lmean [expr {$sum / $n}] \
+        lp05 [lindex $lm [expr {int(floor(0.05 * ($n - 1)))}]] lp95 [lindex $lm [expr {int(floor(0.95 * ($n - 1)))}]] \
+        inverted [expr {min($npos, $nneg) + $ndeg}]]
+}
+
 # =====================================================================
 # MODULE 3 : 2D Pure-Quad Engine (STRICT 2.0 mm, ZERO Mixed Fallback!)
 # =====================================================================
@@ -1348,8 +1464,242 @@ proc ylh6_run_3d {cfg_dict} {
 }
 
 # =====================================================================
+# MODULE 4B : 3D TETRA Engine (STRICT 2.0 mm)
+#   closed 2.0 mm tria shell -> sliver collapse + relax (NO tria->quad merge)
+#   -> tetmesh -> Abaqus tetra order/type -> tetra quality
+#   Works on surfaces-only models: it needs a CLOSED shell, not a solid entity.
+# =====================================================================
+
+# --- [TUNABLE] HyperMesh tetmesh call (mark 1 = closed tria shell) ---
+#   Two common argument layouts are tried in order. If both fail in your
+#   HyperMesh, paste the *tetmesh line from your working tetra script (or from
+#   command.tcl after one manual 3D > tetramesh run) into this proc.
+proc ylh6_tetmesh_exec {} {
+    set pars "pars: upd_shell fix_comp_bdr post_cln elem_order = 1 delaunay el2comp=0 fill_void=1 tet_clps='0.100000,0.300000, 0.560000, 0.660000, 0.100000, 0.300000, 0.500000'"
+    set errs {}
+    foreach variant {A B} {
+        set before [ylh6_count_elems {tetra4 tetra10}]
+        *clearmark elems 1; *clearmark elems 2
+        catch { *createmark elems 1 "by config" tria3 quad4 }
+        if {$variant eq "A"} {
+            set rc [catch { *tetmesh elements 1 1 elements 0 -1 1 $pars } e]
+        } else {
+            set rc [catch { *tetmesh elements 1 1 elements 2 0 $pars } e]
+        }
+        *clearmark elems 1; *clearmark elems 2
+        if {[ylh6_count_elems {tetra4 tetra10}] > $before} { return [list 1 "tetmesh layout $variant"] }
+        lappend errs "layout $variant: [expr {$rc ? $e : {ran but created 0 tetra}}]"
+    }
+    return [list 0 [join $errs " | "]]
+}
+
+proc ylh6_run_tet {cfg_dict} {
+    ylh6_ckpt_init
+    set ELEM_SIZE       2.0
+    set TARGET_ASPECT   [expr {double([dict get $cfg_dict target_aspect])}]
+    set MIN_JACOBIAN    [expr {double([dict get $cfg_dict min_jac])}]
+    set FEATURE_ANGLE   [expr {double([dict get $cfg_dict feature_angle])}]
+    set SLIVER_EDGE_MAX [expr {double([dict get $cfg_dict sliver_edge_max])}]
+    set TET_COLLAPSE    [expr {double([dict get $cfg_dict tet_collapse_min])}]
+    set TET_VSKEW       [expr {double([dict get $cfg_dict tet_vskew_max])}]
+    set TET_TYPE        [string toupper [string trim [dict get $cfg_dict tet_elem_type]]]
+    set DO_ZIPPER       [dict get $cfg_dict do_zipper]
+    set DO_SMOOTH       [dict get $cfg_dict do_smooth]
+    set SMOOTH_PASSES   [dict get $cfg_dict smooth_passes]
+    set PATCH_HOLES     [dict get $cfg_dict patch_holes]
+    set DELETE_2D       [dict get $cfg_dict delete_2d]
+    set SELECT_MODE     [dict get $cfg_dict select_mode]
+    set SAVE_HM         [dict get $cfg_dict save_hm]
+    set EXPORT_INP      [dict get $cfg_dict export_inp]
+    set OUT_DIR         [dict get $cfg_dict out_dir]
+    set OUT_NAME        [dict get $cfg_dict out_name]
+    ylh6_ckpt "TET_START" "size=2.0mm type=$TET_TYPE select=$SELECT_MODE"
+
+    # 1. Surfaces forming the closed shell
+    *clearmark surfs 1
+    if {$SELECT_MODE eq "pick"} {
+        *createmarkpanel surfs 1 "Select the CLOSED set of surfaces for TETRA (2.0 mm)"
+    } else {
+        *createmark surfs 1 "all"
+    }
+    set surf_ids [hm_getmark surfs 1]
+    *clearmark surfs 1
+    if {[llength $surf_ids] == 0} { return [dict create status FAIL msg "No surfaces found/selected."] }
+
+    # 2. Clear old elements
+    if {$SELECT_MODE eq "all"} {
+        *clearmark elems 1; *createmark elems 1 "all"
+        if {[llength [hm_getmark elems 1]] > 0} { catch { *deletemark elems 1 } }
+        *clearmark elems 1
+    }
+    catch { *ameshclearsurface }
+    catch { *elementorder 1 }
+    catch { *setedgedensitylink 0 }
+
+    # 3. 2.0 mm TRIA shell (automesh type 0 = trias) + patch unmeshed surfaces with trias
+    set mesh_err ""
+    ylh6_ckpt "TET_SHELL_EXEC" "*defaultremeshsurf size=2.0 type=0(trias)"
+    *clearmark surfs 1; eval *createmark surfs 1 $surf_ids
+    if {[catch { *defaultremeshsurf 1 $ELEM_SIZE 0 0 2 1 1 1 1 0 0 0 0 } err]} { set mesh_err "defaultremeshsurf(trias): $err" }
+    *clearmark surfs 1
+    set n_unmeshed 0
+    if {$PATCH_HOLES} {
+        foreach sz {1.0 0.7} {
+            set unm [ylh6_find_unmeshed_surfs $surf_ids]
+            if {[llength $unm] == 0} { break }
+            *clearmark surfs 1; eval *createmark surfs 1 $unm
+            catch { *defaultremeshsurf 1 $sz 0 0 2 1 1 1 1 0 0 0 0 }
+            *clearmark surfs 1
+        }
+    }
+    set n_unmeshed [llength [ylh6_find_unmeshed_surfs $surf_ids]]
+    *clearmark elems 1
+    catch { *createmark elems 1 "by config" tria3 quad4 }
+    if {[llength [hm_getmark elems 1]] > 0} { catch { *equivalence elems 1 0.01 1 0 0 } }
+    *clearmark elems 1
+
+    # 4. Shell repair: sliver collapse + relaxation (tria->quad merge is NOT used for tetra)
+    set n_zipped 0; set n_relaxed 0
+    if {$DO_ZIPPER || $DO_SMOOTH} {
+        if {[hqc6::load_2d_hm] > 0} {
+            if {$DO_ZIPPER} { set n_zipped [hqc6::zipper_collapse_inmem $TARGET_ASPECT $SLIVER_EDGE_MAX $FEATURE_ANGLE] }
+            set moved {}
+            if {$DO_SMOOTH && $SMOOTH_PASSES > 0} {
+                set moved [hqc6::relax_2d_inmem $ELEM_SIZE $FEATURE_ANGLE $SMOOTH_PASSES]
+                set n_relaxed [llength $moved]
+            }
+            hqc6::commit_2d_hm $moved
+        }
+        *clearmark elems 1
+        catch { *createmark elems 1 "by config" tria3 quad4 }
+        if {[llength [hm_getmark elems 1]] > 0} { catch { *equivalence elems 1 0.01 1 0 0 } }
+        *clearmark elems 1
+    }
+
+    # 5. Shell must be closed before tetmesh
+    set n_tria [ylh6_count_elems tria3]
+    set n_quad [ylh6_count_elems quad4]
+    set free_e [ylh6_edges_2d 0]
+    set t_e    [ylh6_edges_2d 1]
+    lassign [ylh6_tria_angles] ang_min ang_max ang_lo ang_hi
+    ylh6_ckpt "TET_SHELL_READY" "tria=$n_tria quad=$n_quad free=$free_e tedge=$t_e minang=[format %.1f $ang_min]"
+    set shell_txt [format "tria3=%d, quad4=%d, unmeshed surfs=%d, free edges=%d, T-edges=%d\n    repairs: %d sliver collapses, %d nodes relaxed\n    tria angles: min=%.1f (%d below 20), max=%.1f (%d above 120)" \
+        $n_tria $n_quad $n_unmeshed $free_e $t_e $n_zipped $n_relaxed $ang_min $ang_lo $ang_max $ang_hi]
+    if {$n_tria == 0 || $free_e > 0 || $t_e > 0} {
+        set m "YL_HEX_V6 TETRA (STRICT 2.0 mm) stopped before tetmesh  \[CHECK\]\n\n- Tria shell: $shell_txt\n\nTetmesh needs a CLOSED tria shell (free edges = 0, T-edges = 0).\nThe shell is kept so you can inspect it (Tool > edges > free edges).\nFix the gaps (Geom > autocleanup / edge edit > equivalence) and run again."
+        if {$mesh_err ne ""} { append m "\n\n*** $mesh_err" }
+        return [dict create status CHECK msg $m]
+    }
+
+    # 6. Tetmesh
+    ylh6_ckpt "TET_TETMESH_EXEC" "shell tria=$n_tria"
+    lassign [ylh6_tetmesh_exec] tm_ok tm_txt
+    set n_tet [ylh6_count_elems {tetra4 tetra10}]
+    ylh6_ckpt "TET_TETMESH_DONE" "ok=$tm_ok tetra=$n_tet ($tm_txt)"
+    if {$n_tet == 0} {
+        return [dict create status FAIL msg "YL_HEX_V6 TETRA (STRICT 2.0 mm)  \[FAIL\]\n\n- Tria shell: $shell_txt\n- tetmesh created 0 tetra:\n    $tm_txt\n\nPaste the *tetmesh line from your working tetra script into proc ylh6_tetmesh_exec."]
+    }
+    if {$DELETE_2D} { ylh6_delete_elems {tria3 tria6 quad4 quad8} }
+
+    # 7. Abaqus tetra order / type (C3D10* = 2nd order: tetra4 -> tetra10, midside nodes on geometry)
+    set tpl_path "[hm_info -appinfo SPECIFIEDPATH TEMPLATES_DIR]/feoutput/abaqus/standard.3d"
+    set assigned_type ""; set type_err ""
+    catch { *templatefileset $tpl_path }
+    set tp [ylh6_lookup_abaqus_type $TET_TYPE $tpl_path]
+    if {[llength $tp] == 2} {
+        lassign $tp tcfg ttyp
+        set is2 [expr {$tcfg == 210}]
+        if {$is2} {
+            *clearmark elems 1; *createmark elems 1 "by config" tetra4
+            if {[llength [hm_getmark elems 1]] > 0} { catch { *orderchangetosecond 1 1 } }
+            *clearmark elems 1
+            if {[ylh6_count_elems tetra10] == 0} { set type_err "2nd-order (tetra10) conversion failed; elements remain tetra4" }
+        }
+        *clearmark elems 1; *createmark elems 1 "by config" [expr {$is2 ? "tetra10" : "tetra4"}]
+        set e0 [lindex [hm_getmark elems 1] 0]
+        if {$e0 ne ""} {
+            catch { *elementtype $tcfg $ttyp }; catch { *elementsettypes 1 }
+            catch { set assigned_type [hm_getvalue elems id=$e0 dataname=typename] }
+        }
+        *clearmark elems 1
+        if {$type_err eq "" && $assigned_type ne "" && $assigned_type ne $TET_TYPE} {
+            set type_err "Element type mismatch: actual='$assigned_type', wanted='$TET_TYPE'"
+        }
+    } else {
+        set type_err "'$TET_TYPE' not found in the Abaqus template - type not assigned"
+    }
+    set n_tet4  [ylh6_count_elems tetra4]
+    set n_tet10 [ylh6_count_elems tetra10]
+
+    # 8. Tetra quality: HM checks + independent metrics
+    set hm_asp -1; set hm_jac -1; set hm_col -1
+    foreach {var cmd lim lbl} [list \
+        hm_asp *elementtestaspect        $TARGET_ASPECT "3D Aspect" \
+        hm_jac *elementtestjacobian      $MIN_JACOBIAN  "3D Jacobian" \
+        hm_col *elementtesttetracollapse $TET_COLLAPSE  "3D Tet Collapse"] {
+        *clearmark elems 1; *clearmark elems 2
+        catch { *createmark elems 1 "by config" tetra4 tetra10 }
+        if {![catch { $cmd elems 1 $lim 2 2 1 $lbl }]} { set $var [llength [hm_getmark elems 2]] }
+        *clearmark elems 1; *clearmark elems 2
+    }
+    set T [ylh6_measure_tet $TET_COLLAPSE $TET_VSKEW]
+
+    # 9. Save / export
+    set saved_hm "(not saved)"; set saved_inp "(not exported)"
+    set stem [expr {$OUT_NAME ne "" ? $OUT_NAME : "YL_V6_TETRA_${TET_TYPE}_2mm"}]
+    if {$SAVE_HM && $OUT_DIR ne ""} {
+        file mkdir $OUT_DIR
+        set out_hm [file join $OUT_DIR "${stem}.hm"]
+        catch { hm_answernext yes }
+        if {![catch { *writefile $out_hm 1 }]} { set saved_hm $out_hm }
+    }
+    if {$EXPORT_INP && $OUT_DIR ne "" && $type_err eq "" && [dict get $T inverted] == 0} {
+        file mkdir $OUT_DIR
+        set out_inp [file join $OUT_DIR "${stem}.inp"]
+        catch { file delete $out_inp }; catch { hm_answernext yes }
+        if {![catch { *createstringarray 2 "HMBOMCOMMENTS_XML" "EXPORTIDS_SKIP"; *feoutputwithdata $tpl_path $out_inp 0 0 2 1 2 }] && [file exists $out_inp]} {
+            set saved_inp $out_inp
+        }
+    }
+
+    # 10. Report
+    set fmt_hm {x { expr {$x < 0 ? "n/a" : $x} }}
+    set pass [expr {$mesh_err eq "" && $type_err eq "" && $n_tet > 0 && [dict get $T inverted] == 0 \
+        && [dict get $T col_bad] == 0 && [dict get $T vsk_bad] == 0 && $hm_asp <= 0 && $hm_jac <= 0 ? 1 : 0}]
+    set status [expr {$pass ? "OK" : "CHECK"}]
+    set msg [format "YL_HEX_V6 TETRA (STRICT 2.0 mm) Finished  \[%s\]\n\n- Element: Tetra, Abaqus type %s (actual: %s)  -> tetra4=%d, tetra10=%d\n- Tria shell: %s\n- tetmesh: %s\n- MEASURED tet edge length: mean=%.2f mm (p05=%.2f, p95=%.2f)\n- Tetra quality:\n    Tet collapse (>= %.2f): min=%.3f, mean=%.3f, failed=%d  | HM check: %s\n    Vol skew     (<= %.2f): max=%.3f, failed=%d\n    HM Aspect    (<= %.1f): failed=%s\n    HM Jacobian  (>= %.2f): failed=%s  (only meaningful for 2nd-order C3D10*)\n    Inverted / degenerate tets: %d\n- Saved HM: %s\n- Exported INP: %s\n- Checkpoint Log: %s" \
+        $status $TET_TYPE $assigned_type $n_tet4 $n_tet10 $shell_txt $tm_txt \
+        [dict get $T lmean] [dict get $T lp05] [dict get $T lp95] \
+        $TET_COLLAPSE [dict get $T col_min] [dict get $T col_mean] [dict get $T col_bad] [apply $fmt_hm $hm_col] \
+        $TET_VSKEW [dict get $T vsk_max] [dict get $T vsk_bad] \
+        $TARGET_ASPECT [apply $fmt_hm $hm_asp] $MIN_JACOBIAN [apply $fmt_hm $hm_jac] \
+        [dict get $T inverted] $saved_hm $saved_inp $::YLH6_CKPT_FILE]
+    if {$mesh_err ne ""} { append msg "\n\n*** $mesh_err" }
+    if {$type_err ne ""} { append msg "\n*** $type_err" }
+    catch { set fh [open $::YLH6_REPORT_FILE w]; puts $fh $msg; close $fh }
+    ylh6_ckpt "TET_FINISH" "status=$status tetra=$n_tet"
+    return [dict create status $status msg $msg]
+}
+
+# =====================================================================
 # MODULE 5 : GUI (Fresh ::ylh6_cfg)
 # =====================================================================
+# Grey out the fields that the selected mode does not use
+proc ylh6_gui_mode_update {args} {
+    set w .ylhex6
+    if {![winfo exists $w]} { return }
+    set m $::ylh6_cfg(mode)
+    set on_tet   [expr {$m eq "tet"  ? "normal" : "disabled"}]
+    set on_hex   [expr {$m eq "hex"  ? "normal" : "disabled"}]
+    set on_quad  [expr {$m eq "quad" ? "normal" : "disabled"}]
+    set not_tet  [expr {$m ne "tet"  ? "normal" : "disabled"}]
+    foreach {wid st} [list $w.f2.ewp $not_tet $w.f2.el1 $on_quad $w.f2.oet $on_hex \
+                           $w.f2.etc $on_tet $w.f2.evs $on_tet $w.f2.ott $on_tet \
+                           $w.f3.c2 $on_quad $w.f3.c4 $on_quad] {
+        catch { $wid configure -state $st }
+    }
+}
+
 proc ylh6_launch_gui {} {
     foreach {k v} [ylh6_default_params] {
         if {![info exists ::ylh6_cfg($k)]} { set ::ylh6_cfg($k) $v }
@@ -1358,22 +1708,24 @@ proc ylh6_launch_gui {} {
 
     catch { destroy .ylhex6 }
     set w [toplevel .ylhex6]
-    wm title $w "YL Mesh HEX V6 PURE (STRICT 2.0 mm - Quads-Only + V-Tip Sliver Fix)"
+    wm title $w "YL Mesh V6 PURE (STRICT 2.0 mm - Quad / Hexa / Tetra)"
     wm resizable $w 0 0
 
     set f1 [labelframe $w.f1 -text " 1. Mode & Target (STRICT 2.0 mm, Quads-Only / Pure Hexa) " -padx 8 -pady 6]
     pack $f1 -fill x -padx 10 -pady 5
     radiobutton $f1.m1 -text "2D Pure-Quad (Hexa Skin, type=4 + V-Tip Fix)" -variable ::ylh6_cfg(mode) -value "quad"
     radiobutton $f1.m2 -text "3D Pure-Hexa (Multi-Solid Map, flags=131076)" -variable ::ylh6_cfg(mode) -value "hex"
+    radiobutton $f1.m3 -text "3D Tetra (2.0 mm tria shell -> tetmesh, no solid needed)" -variable ::ylh6_cfg(mode) -value "tet"
     grid $f1.m1 -row 0 -column 0 -sticky w -padx 4
     grid $f1.m2 -row 0 -column 1 -sticky w -padx 12
+    grid $f1.m3 -row 1 -column 1 -sticky w -padx 12
 
     radiobutton $f1.s1 -text "All Solids / Surfaces" -variable ::ylh6_cfg(select_mode) -value "all"
     radiobutton $f1.s2 -text "Pick Manually"         -variable ::ylh6_cfg(select_mode) -value "pick"
-    grid $f1.s1 -row 1 -column 0 -sticky w -padx 4 -pady 2
-    grid $f1.s2 -row 1 -column 1 -sticky w -padx 12 -pady 2
+    grid $f1.s1 -row 2 -column 0 -sticky w -padx 4 -pady 2
+    grid $f1.s2 -row 2 -column 1 -sticky w -padx 12 -pady 2
 
-    set f2 [labelframe $w.f2 -text " 2. Sliver & Quality Criteria " -padx 8 -pady 6]
+    set f2 [labelframe $w.f2 -text " 2. Sliver & Quality Criteria (greyed = not used in this mode) " -padx 8 -pady 6]
     pack $f2 -fill x -padx 10 -pady 5
 
     label $f2.lsz -text "Elem Size (mm):"
@@ -1400,6 +1752,14 @@ proc ylh6_launch_gui {} {
     grid $f2.lsz $f2.esz $f2.lsl $f2.esl $f2.ll1 $f2.el1 -sticky w -padx 4 -pady 3
     grid $f2.las $f2.eas $f2.ljc $f2.ejc $f2.lwp $f2.ewp -sticky w -padx 4 -pady 3
     grid $f2.lfa $f2.efa $f2.lsm $f2.esm $f2.let $f2.oet -sticky w -padx 4 -pady 3
+
+    label $f2.ltc -text "Tet Collapse Min:"
+    entry $f2.etc -textvariable ::ylh6_cfg(tet_collapse_min) -width 8
+    label $f2.lvs -text "Vol Skew Max:"
+    entry $f2.evs -textvariable ::ylh6_cfg(tet_vskew_max) -width 8
+    label $f2.ltt -text "Abaqus Tetra:"
+    eval tk_optionMenu $f2.ott ::ylh6_cfg(tet_elem_type) C3D10MH C3D10H C3D10M C3D10 C3D4H C3D4
+    grid $f2.ltc $f2.etc $f2.lvs $f2.evs $f2.ltt $f2.ott -sticky w -padx 4 -pady 3
 
     set f3 [labelframe $w.f3 -text " 3. Targeted Pure-Quad Fixes (Zero CAD B-Rep Crash) " -padx 8 -pady 6]
     pack $f3 -fill x -padx 10 -pady 5
@@ -1441,11 +1801,14 @@ proc ylh6_launch_gui {} {
     pack $fb.run -side right -padx 4
 
     wm protocol $w WM_DELETE_WINDOW { set ::ylh6_gui_action "cancel"; destroy .ylhex6 }
+    trace add variable ::ylh6_cfg(mode) write ylh6_gui_mode_update
+    ylh6_gui_mode_update
     tkwait window $w
+    trace remove variable ::ylh6_cfg(mode) write ylh6_gui_mode_update
 
     if {$::ylh6_gui_action ne "run"} { return }
 
-    foreach {k lbl} {sliver_edge_max "Sliver Edge Max" local_size_1 "Local Remesh" target_aspect "Aspect Limit" min_jac "Min Jacobian" max_warp "Max Warpage" feature_angle "Feature Angle" smooth_passes "Relax Passes"} {
+    foreach {k lbl} {sliver_edge_max "Sliver Edge Max" local_size_1 "Local Remesh" target_aspect "Aspect Limit" min_jac "Min Jacobian" max_warp "Max Warpage" feature_angle "Feature Angle" smooth_passes "Relax Passes" tet_collapse_min "Tet Collapse Min" tet_vskew_max "Vol Skew Max"} {
         if {![string is double -strict $::ylh6_cfg($k)]} {
             tk_messageBox -icon error -title "YL HEX V6" -message "Invalid number for $lbl: '$::ylh6_cfg($k)'"
             return
@@ -1455,6 +1818,8 @@ proc ylh6_launch_gui {} {
     set cfg_dict [array get ::ylh6_cfg]
     if {$::ylh6_cfg(mode) eq "hex"} {
         set res [ylh6_run_3d $cfg_dict]
+    } elseif {$::ylh6_cfg(mode) eq "tet"} {
+        set res [ylh6_run_tet $cfg_dict]
     } else {
         set res [ylh6_run_2d $cfg_dict]
     }
