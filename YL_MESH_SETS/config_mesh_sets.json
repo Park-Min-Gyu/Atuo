@@ -3,8 +3,8 @@
  "models_dir": "models",
  "out_dir": "out",
  "elem_size": 2.0,
- "engine": "v10",
- "_comment_engine": "engine: v10 (YL_V10 Tetra) | hex (YL_HEX_V6 순수 헥사 C3D8H, 2.0 mm 고정, 안 되면 Tetra)",
+ "engine": "hex",
+ "_comment_engine": "engine: hex (헥사 전용, 기본 : YL_HEX_V6 SolidMap 순수 헥사 C3D8H, 2.0 mm 고정. 실패해도 Tetra 로 안 바꿈) | v10 (Tetra : YL_V10)",
  "elem_type": "C3D10H",
  "fixed_size": true,
  "upgrade_tet4": true,
@@ -22,8 +22,7 @@
   "v10_fillet_rows": "altair",
   "_comment": "exe: auto 면 시작 메뉴 -> C:/Program Files/Altair/2019/hm/bin/win64/hmbatch.exe 순으로 찾음. 못 찾으면 전체 경로를 적거나 set YL_HMBATCH=경로",
   "hex_tcl": "hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl",
-  "hex_elem_type": "C3D8H",
-  "hex_fallback_tet": true
+  "hex_elem_type": "C3D8H"
  },
  "geometry": {
   "shape_mode": "general",

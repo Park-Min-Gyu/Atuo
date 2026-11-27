@@ -116,14 +116,12 @@
   "engine": "v10",
   "hex_tcl": "hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl",
   "hex_elem_type": "C3D8H",
-  "hex_fallback_tet": true,
-  "_comment_hex": "engine: hex 로 하면 연구실 YL_HEX_V6 (SolidMap 순수 헥사, 2.0 mm 고정, C3D8H) 를 먼저 시도. 매핑 안 되는 솔리드면 hex_fallback_tet=true 일 때 Tetra(YL_V10 -> gmsh -> TetWild)로 자동 전환",
   "v10_ps1": "hypermesh/YL_V10/YL_V10.ps1",
   "v10_aspect": 5.0,
   "v10_v8_fallback": true,
   "v10_fillet_rows": "altair",
   "v10_then_v5": false,
-  "_comment_engine": "engine: v10 (연구실 YL_V10 = BatchMesher 스킨 -> 실패 시 V8 -> Tetra+INP) | v5 (예전 YL_V5_batch.tcl). v10 이 실패하면 gmsh 예비 메셔. v10_then_v5: true 면 그 사이에 예전 V5 도 시도",
+  "_comment_engine": "smoketest 는 Tetra 시험 메시(.inp)로 Abaqus 만 점검하므로 v10. 실제 실행 설정(config_abaqus.json)은 hex",
   "tcl": "hypermesh/YL_V5_batch.tcl",
   "args": [
    "-tcl"

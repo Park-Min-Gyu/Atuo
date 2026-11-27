@@ -57,7 +57,7 @@ else:
     print("  [NG] hmbatch.exe 를 못 찾음. config_abaqus.json 의 hypermesh.exe 에 전체 경로를 적어주세요.")
     print("       보통 위치: C:/Program Files/Altair/2019/hm/bin/win64/hmbatch.exe")
     print("       (.inp 형상만 쓸 거면 HyperMesh 없이도 됩니다)")
-engine = str(hm_cfg.get("engine", "v10")).lower()
+engine = str(hm_cfg.get("engine", "hex")).lower()  # [v25] 기본은 헥사
 if engine == "v10":
     ps1 = cfg_path.parent / hm_cfg.get("v10_ps1", "hypermesh/YL_V10/YL_V10.ps1")
     good = ps1.exists()
@@ -72,6 +72,25 @@ if engine == "v10":
             print(f"  [NG] YL_V10.ps1 에서 엔진을 꺼내지 못함: {e}")
     else:
         print(f"  [NG] YL_V10.ps1 없음: {ps1}")
+    ok = ok and good
+elif engine == "hex":
+    # [v25] 헥사 전용 : YL_HEX_V6 원본 스크립트가 있고, 배치용 복사본(설정 창 줄 제거)을 만들 수 있는지 확인
+    tcl = cfg_path.parent / hm_cfg.get("hex_tcl", "hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl")
+    good = tcl.exists()
+    if good:
+        try:
+            from core import yl_hex
+            import tempfile
+            cp = yl_hex._engine_copy(tcl, Path(tempfile.mkdtemp()) / "YL_HEX_engine.tcl")
+            good = "proc ylh6_run_3d" in cp.read_text(encoding="utf-8", errors="ignore")
+            print(f"  [{'OK' if good else 'NG'}] YL_HEX 헥사 엔진: {tcl}"
+                  + ("" if good else "  (ylh6_run_3d 가 없음 - YL_HEX_V6 스크립트가 맞는지 확인)"))
+        except Exception as e:
+            good = False
+            print(f"  [NG] YL_HEX 엔진 준비 실패: {e}")
+    else:
+        print(f"  [NG] YL_HEX tcl 없음: {tcl}")
+    print(f"  메시 엔진: 헥사 전용 ({hm_cfg.get('hex_elem_type', 'C3D8H')}, 2.0 mm 고정, Tetra 로 넘어가지 않음)")
     ok = ok and good
 else:
     tcl = cfg_path.parent / hm_cfg.get("tcl", "hypermesh/YL_V5_batch.tcl")

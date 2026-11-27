@@ -47,17 +47,16 @@ def mesh_model(cfg, src: Path, name: str, mdir: Path) -> Path:
     if not exe:
         raise RuntimeError("hmbatch.exe 를 못 찾음 -> config 의 hypermesh.exe 에 전체 경로를 적어 주세요")
     hm["exe"] = exe
-    if str(cfg.get("engine", "v10")).lower() == "hex":
-        # 연구실 YL_HEX_V6 (SolidMap 순수 헥사, 2.0 mm 고정, C3D8H). 안 되면 YL_V10 Tetra 로
+    if str(cfg.get("engine", "hex")).lower() == "hex":
+        # 헥사 전용 : 연구실 YL_HEX_V6 (SolidMap 순수 헥사, 2.0 mm 고정, C3D8H). 실패해도 Tetra 로 바꾸지 않음
         hs = yl_hex.run_hex(hm, HERE / hm.get("hex_tcl", "hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl"), src, mdir / "mesh",
                             name, float(cfg["elem_size"]), hm.get("hex_elem_type", "C3D8H"))
         if hs.get("STATUS") == "OK":
             log(f"[{name}] YL_HEX 헥사 메시 성공 : Hex {hs.get('N_HEX')}개 ({hs.get('elapsed_s')}s)")
             return Path(hs["INP_FILE"])
-        log(f"[{name}] 헥사 메시 실패 -> {hs.get('MESSAGE', '')}")
-        if not hm.get("hex_fallback_tet", True):
-            raise RuntimeError(f"헥사 메시 실패: {hs.get('MESSAGE', '')[:300]}")
-        log(f"[{name}] YL_V10 Tetra 로 넘어갑니다")
+        for l in hs.get("LOG_TAIL", [])[-3:]:
+            log(f"[{name}]   hex| {l}")
+        raise RuntimeError(f"헥사 메시 실패: {hs.get('MESSAGE', '')[:400]}")
     st = yl_v10.run_v10(hm, HERE / hm.get("v10_ps1", "hypermesh/YL_V10/YL_V10.ps1"), src, mdir / "mesh", name,
                         float(cfg["elem_size"]), cfg.get("elem_type", "C3D10H"), bool(cfg.get("fixed_size", True)))
     log(f"[{name}] YL_V10 엔진={st.get('ENGINE')} 2D 합격={st.get('PASS2D')} Tria={st.get('N_TRIA')} "
@@ -72,6 +71,9 @@ def mesh_model(cfg, src: Path, name: str, mdir: Path) -> Path:
 def sets_model(cfg, inp: Path, name: str, mdir: Path) -> dict:
     g = cfg.get("geometry", {})
     m = inp_mesh.read_inp_mesh(inp)
+    if str(cfg.get("engine", "hex")).lower() == "hex" and m.family != "hex8":
+        raise RuntimeError(f"헥사 전용 모드(engine = hex)인데 메시가 헥사가 아닙니다 ({m.family}, {inp.name}) "
+                           f"-> 헥사 .inp 를 넣거나, Tetra 로 할 때만 config 의 engine 을 v10 으로")
     inp_mesh.check_mesh_sane(m, 50)
     comp = inp_mesh.keep_largest_component(m)
     if comp.get("warning"):

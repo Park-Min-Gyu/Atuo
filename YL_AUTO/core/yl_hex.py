@@ -7,7 +7,7 @@ yl_hex.py : 연구실 YL_HEX_V6_PURE_2mm.tcl (HyperMesh 헥사 메시)을 파이
   hmbatch 로 '헥사 + 3D' 모드(ylh6_run_3d : Multi-Solid Map, quads_only = 순수 헥사)를 바로 부른다.
 
   합격 조건 : Abaqus INP 가 나왔고, 헥사가 1 개 이상, 웨지(penta) 0 개, 매핑 안 된 솔리드 0 개
-  -> 아니면 FAIL 을 돌려주고, 파이프라인이 Tetra 메셔(YL_V10 -> gmsh -> TetWild)로 넘어간다.
+  -> 아니면 FAIL 을 돌려준다. 헥사 전용이라 Tetra 메셔로 넘어가지 않고, 그 모델은 메시 실패로 끝난다.
   주의 : SolidMap 은 '매핑 가능한' 솔리드에서만 헥사를 만든다. 공극·필렛이 많은 부싱 솔리드는
          통째로는 매핑이 안 되는 경우가 많다 (원본 스크립트도 '솔리드를 나눠라'고 안내한다).
 """

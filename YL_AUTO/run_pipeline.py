@@ -92,6 +92,11 @@ def resolve(cfg, p) -> Path:
     return Path(os.path.abspath(str(p if p.is_absolute() else cfg["_base"] / p)))
 
 
+def mesh_engine(cfg) -> str:
+    """[v25] 메시 엔진. config 에 hypermesh.engine 이 없으면 헥사(hex)가 기본 (Tetra 는 'v10' 이라고 적었을 때만)."""
+    return str(cfg.get("hypermesh", {}).get("engine", "hex")).lower()
+
+
 def model_list(cfg) -> list[dict]:
     models = list(cfg.get("models", []))
     pat = cfg.get("models_glob")
@@ -126,13 +131,7 @@ def jobs_for(cfg, tag):
 
 # ---------------------------------------------------------------------------
 def stage_mesh(cfg, m, es, tag_dir, force):
-    st = _stage_mesh(cfg, m, es, tag_dir, force)
-    # [v24] 헥사가 안 돼서 Tetra 로 만든 메시 : 다음 실행 때 헥사를 매번 다시 시도하지 않도록 표시
-    if (str(cfg["hypermesh"].get("engine", "v10")).lower() == "hex" and st.get("STATUS") == "OK"
-            and not str(st.get("ALGO", "")).startswith("YL_HEX") and not st.get("HEX_FAILED")
-            and Path(m["file"]).suffix.lower() != ".inp"):
-        _mark_hex_failed(tag_dir / "mesh", "hex failed -> tetra fallback")
-    return st
+    return _stage_mesh(cfg, m, es, tag_dir, force)
 
 
 def _stage_mesh(cfg, m, es, tag_dir, force):
@@ -149,15 +148,17 @@ def _stage_mesh(cfg, m, es, tag_dir, force):
         ok, why = runners.tet_count_ok(st, cfg["hypermesh"].get("tet_min_ratio", 0.25))
         # [v15] 2 mm 고정 설정이 바뀌었으면 예전 메시를 쓰지 않고 다시 만든다
         want_fixed = 1 if cfg["mesh"].get("fixed_size") else 0
-        if st.get("STATUS") == "OK" and ok and int(st.get("FIXED_SIZE", 0) or 0) != want_fixed:
+        is_hex_mesh = str(st.get("ALGO", "")).startswith("YL_HEX")
+        if st.get("STATUS") == "OK" and ok and not is_hex_mesh and int(st.get("FIXED_SIZE", 0) or 0) != want_fixed:
             ok = False
             log(f"[{m['name']}] 메시 크기 설정(fixed_size={want_fixed})이 이전 메시와 달라 다시 메시합니다")
-        eng_now = str(cfg["hypermesh"].get("engine", "v10")).lower()
+        eng_now = mesh_engine(cfg)
         want_v10 = eng_now == "v10"
-        if st.get("STATUS") == "OK" and ok and eng_now == "hex" and not (str(st.get("ALGO", "")).startswith("YL_HEX")
-                                                                       or st.get("HEX_FAILED")):
+        if st.get("STATUS") == "OK" and ok and eng_now == "hex" and not is_hex_mesh:
             ok = False
-            log(f"[{m['name']}] 이전 메시는 Tetra({st.get('ALGO', '?')}) -> 헥사(YL_HEX)로 다시 메시합니다")
+            log(f"[{m['name']}] 이전 메시는 헥사가 아님({st.get('ALGO', '?')}) -> 헥사(YL_HEX)로 다시 메시합니다")
+        if eng_now == "hex" and st.get("STATUS") == "OK" and ok:
+            return st
         if st.get("STATUS") == "OK" and ok and want_v10 and not str(st.get("ALGO", "")).startswith(("YL_V10", "GMSH", "ROBUST")):
             ok = False
             log(f"[{m['name']}] 이전 메시는 예전 엔진({st.get('ALGO', '?')})으로 만든 것 -> YL_V10 으로 다시 메시합니다")
@@ -171,31 +172,27 @@ def _stage_mesh(cfg, m, es, tag_dir, force):
     hm["fixed_size"] = bool(cfg["mesh"].get("fixed_size"))
     g_cfg = dict(cfg.get("gmsh_fallback", {}))
     g_cfg["fixed_size"] = hm["fixed_size"]
+    engine = mesh_engine(cfg)
+    if engine == "hex":
+        # [v25] 헥사 전용 : YL_HEX_V6 (SolidMap 순수 헥사, C3D8H, 2.0 mm 고정) 만 쓴다.
+        #       실패해도 Tetra 메셔(YL_V10 / gmsh / TetWild)로 넘어가지 않고 그 모델은 실패로 끝낸다.
+        hs = yl_hex.run_hex(hm, resolve(cfg, hm.get("hex_tcl", "hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl")), src,
+                            mesh_dir, m["name"], es, hm.get("hex_elem_type", "C3D8H"))
+        if es != 2.0:
+            log(f"[{m['name']}] 참고: YL_HEX 스크립트는 요소크기 2.0 mm 고정입니다 (config 의 {es} mm 는 쓰이지 않음)")
+        if hs.get("STATUS") == "OK":
+            log(f"[{m['name']}] 헥사 메시 성공 : Hex {hs.get('N_HEX')}개, 솔리드 {hs.get('N_SOLIDS')}개 ({hs.get('elapsed_s')}s)")
+        else:
+            log(f"[{m['name']}] 헥사 메시 실패 -> {hs.get('MESSAGE', '')}")
+            for l in hs.get("LOG_TAIL", [])[-3:]:
+                log(f"[{m['name']}]   hex| {l}")
+        return hs
     if str(cfg["mesh"].get("mesher", "hypermesh")).lower() == "gmsh":
         # [v14] gmsh 를 주 메셔로 (Netgen 최적화로 납작한 Tetra 가 적음). 실패하면 HyperMesh 로.
         gs = runners.run_gmsh(g_cfg, src, mesh_dir, m["name"], es)
         if gs.get("STATUS") == "OK":
             return gs
         log(f"[{m['name']}] gmsh 메시 실패 ({gs.get('MESSAGE', '')}) -> HyperMesh 로 시도")
-    engine = str(hm.get("engine", "v10")).lower()
-    hex_fail = ""
-    if engine == "hex":
-        # [v24] 연구실 YL_HEX_V6 (SolidMap 순수 헥사, C3D8H). 안 되면 Tetra(YL_V10 -> gmsh -> TetWild)로
-        hs = yl_hex.run_hex(hm, resolve(cfg, hm.get("hex_tcl", "hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl")), src,
-                            mesh_dir, m["name"], es, hm.get("hex_elem_type", "C3D8H"))
-        if es != 2.0:
-            log(f"[{m['name']}] 참고: YL_HEX 스크립트는 요소크기 2.0 mm 고정입니다 (설정값 {es} mm 는 Tetra 로 갈 때만 적용)")
-        if hs.get("STATUS") == "OK":
-            log(f"[{m['name']}] 헥사 메시 성공 : Hex {hs.get('N_HEX')}개, 솔리드 {hs.get('N_SOLIDS')}개 ({hs.get('elapsed_s')}s)")
-            return hs
-        hex_fail = hs.get("MESSAGE", "")
-        log(f"[{m['name']}] 헥사 메시 실패 -> {hex_fail}")
-        for l in hs.get("LOG_TAIL", [])[-3:]:
-            log(f"[{m['name']}]   hex| {l}")
-        if not hm.get("hex_fallback_tet", True):
-            return hs
-        log(f"[{m['name']}] Tetra 메셔로 넘어갑니다 (hypermesh.hex_fallback_tet = true)")
-        engine = "v10"
     if engine == "v10":
         # [v20] 연구실 YL_V10 (BatchMesher 스킨 -> 실패 시 V8 -> 같은 세션에서 Tetra + INP)
         ps1 = resolve(cfg, hm.get("v10_ps1", "hypermesh/YL_V10/YL_V10.ps1"))
@@ -239,13 +236,6 @@ def _stage_mesh(cfg, m, es, tag_dir, force):
     return st
 
 
-def _mark_hex_failed(mesh_dir: Path, why: str):
-    f = mesh_dir / "hm_status.txt"
-    if f.exists():
-        with open(f, "a", encoding="utf-8") as fh:
-            fh.write(f"HEX_FAILED={why.replace(chr(10), ' ')[:300] or 1}\n")
-
-
 def stage_build(cfg, m, es, tag, tag_dir, mat, dialect):
     gcfg = dict(cfg.get("geometry", {}))
     gcfg.update({k: v for k, v in m.items() if k in ("axis", "center", "inner_tol_mm", "outer_tol_mm",
@@ -253,6 +243,9 @@ def stage_build(cfg, m, es, tag, tag_dir, mat, dialect):
                                                        "inner_mode", "connect_rmax_frac", "shape_mode", "swage_mode", "outer_mode")})
     src = tag_dir / "mesh" / f"{m['name']}_hm.inp"
     mesh = inp_mesh.read_inp_mesh(src, gcfg.get("elsets"))
+    if mesh_engine(cfg) == "hex" and mesh.family != "hex8":
+        raise ValueError(f"헥사 전용 모드(hypermesh.engine = hex)인데 메시가 헥사가 아닙니다 ({mesh.family}, {src.name}). "
+                         f"헥사 메시만 해석합니다 -> models 폴더의 이 모델이 Tetra .inp 라면 헥사 .inp 로 바꾸거나 빼 주세요")
     inp_mesh.check_mesh_sane(mesh, int(cfg["mesh"].get("min_elems", 50)))
     comp = inp_mesh.keep_largest_component(mesh)
     if comp.get("warning"):
@@ -696,8 +689,9 @@ def main():
                 if "mesh" in stages:
                     log(f"[{tag}] mesh ...")
                     st = stage_mesh(cfg, m, float(es), tag_dir, a.force)
-                    log(f"[{tag}] mesh {st.get('STATUS')} {st.get('MESSAGE', '')} "
-                        f"tet={st.get('N_TET', '-')} badTria={st.get('BAD_TRIA', '-')}")
+                    cnt = (f"hex={st.get('N_HEX')}" if st.get('N_HEX') not in (None, '')
+                           else f"tet={st.get('N_TET', '-')} badTria={st.get('BAD_TRIA', '-')}")
+                    log(f"[{tag}] mesh {st.get('STATUS')} {st.get('MESSAGE', '')} {cnt}")
                     if st.get("FIRST_TRY"):
                         log(f"[{tag}] 1차(YL_V4) 실패 -> HyperMesh 를 새로 띄워 2차(단순 메시) 자동 재시도함. "
                             f"1차 원인: {st.get('FIRST_TRY')}")
@@ -719,8 +713,11 @@ def main():
                     if st.get("STATUS") != "OK":
                         for l in st.get("LOG_TAIL", []):
                             log(f"[{tag}]   | {l}")
-                        log(f"[{tag}] 메시 실패 -> 이 모델은 해석(ODB) 단계로 가지 않습니다. "
-                            f"급하면 HyperMesh GUI 에서 직접 메시한 .inp 를 models 폴더에 넣으면 메시 단계를 건너뜁니다.")
+                        hint = ("헥사 전용 모드: 매핑 안 되는 솔리드는 HyperMesh 에서 블록으로 나누거나, "
+                                "직접 만든 헥사 .inp 를 models 폴더에 넣어 주세요."
+                                if mesh_engine(cfg) == "hex" else
+                                "급하면 HyperMesh GUI 에서 직접 메시한 .inp 를 models 폴더에 넣으면 메시 단계를 건너뜁니다.")
+                        log(f"[{tag}] 메시 실패 -> 이 모델은 해석(ODB) 단계로 가지 않습니다. {hint}")
                         continue
                 info_file = tag_dir / "model_info.json"
                 if "build" in stages or not info_file.exists():

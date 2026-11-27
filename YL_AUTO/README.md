@@ -1,4 +1,5 @@
-> v24 (2026-11-27): 헥사 메시 YL_HEX_V6 엔진 추가 (hypermesh.engine 을 "hex" 로, 안 되면 Tetra 로) - `수정내역_v24.md` 참고
+> v25 (2026-11-27): **헥사 전용** - 메시는 YL_HEX_V6 순수 헥사(C3D8H)만 사용, Tetra 로 넘어가는 동작 완전 삭제 - `수정내역_v25.md` 참고
+> v24 (2026-11-27): 헥사 메시 YL_HEX_V6 엔진 추가 - `수정내역_v24.md` 참고 (v24 에 있던 'Tetra 로 넘어가기'는 v25 에서 삭제)
 > v23 (2026-11-25): 휜 중간절점 때문에 build 가 멈추던 오류 수정 - `수정내역_v23.md` 참고
 > v22 (2026-11-24): 끝난 해석은 입력이 같으면 다시 안 돌림, 바뀌면 자동으로 다시 - `수정내역_v22.md` 참고
 > v21 (2026-11-24): 깨진 CAD 용 최후의 메셔 TetWild 추가 (Part5/Part6) - `수정내역_v21.md` 참고
@@ -22,8 +23,9 @@
 > **처음 쓰는 사람은 [사용설명서.md](사용설명서.md) 부터 읽을 것.** 설치 → 점검 → 실행 → 결과 확인 → 문제 해결 순서로 정리되어 있다.
 
 ```
-CAD(.stp 등) ──► HyperMesh 배치 (YL_V5_batch.tcl = YL_V4 메시 알고리즘 그대로)
-                  └► Tria 품질 최적화 → C3D10H Tetra → Abaqus INP 출력
+CAD(.stp 등) ──► HyperMesh 배치 (YL_HEX_V6_PURE_2mm.tcl = 연구실 헥사 메시, SolidMap)
+                  └► 순수 헥사 C3D8H, 2.0 mm 고정 → Abaqus INP 출력
+                     (헥사가 안 되는 모델은 실패로 끝남. Tetra 로 넘어가지 않음)
              ──► Python: 메시 검사·보정 → 축 +Y 정렬 → INNER/OUTER 자동 선택 → LOAD_RP(0,0,0)
                   └► 메시 전용 INP + Job INP (스웨징 5단계 × X/Y/Z)
              ──► Abaqus 실행 (.odb) → abaqus python 으로 ODB 에서 LOAD_RP 하중-변위 추출
@@ -39,7 +41,9 @@ CAD(.stp 등) ──► HyperMesh 배치 (YL_V5_batch.tcl = YL_V4 메시 알고�
 | `config_abaqus_smoketest.json` | HyperMesh 없이 Abaqus·ODB 추출만 점검하는 4 Job 설정 |
 | `check_env.py`, `run_all.bat` | 환경 점검, 실행용 배치 파일 |
 | `collect_logs.py` | 실행 후 점검용 파일만 zip 으로 묶음 (ODB 제외, 이 파일만 보내면 됨) |
-| `hypermesh/YL_V5_batch.tcl` | YL_V4 메시 코드 + 배치 래퍼 |
+| `hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl` | 연구실 헥사 메시 원본 (**기본 메시 엔진**, HyperMesh 에서 단독 실행도 가능) |
+| `core/yl_hex.py` | 헥사 메시 실행 래퍼 (설정 창 없이 hmbatch 로 '헥사 + 3D' 실행, 결과 판정) |
+| `hypermesh/YL_V10/`, `hypermesh/YL_V5_batch.tcl` | Tetra 메셔 (`hypermesh.engine` 을 `v10` 으로 직접 적었을 때만 사용) |
 | `core/inp_mesh.py` | INP 읽기, 요소 검사·보정, 축 정렬, INNER/OUTER 선택 |
 | `core/ogden.py` | Ogden N=3 피팅(시험데이터)과 Drucker 안정성 점검 |
 | `core/inp_writer.py` | 메시 전용 INP와 Job INP 작성 |
@@ -59,7 +63,7 @@ CAD(.stp 등) ──► HyperMesh 배치 (YL_V5_batch.tcl = YL_V4 메시 알고�
 | 스웨징 | Step-1, OUTER 노드에 반경 변위 u_r = SW (XZ 평면), u_y = 0. SW = 0, +1, +2, −1, −2 mm. **+ = 바깥으로 늘어남, − = 안쪽 압축** (`swaging_outward_positive` 로 반전 가능) |
 | 정특성 | Step-2, OUTER 고정 상태에서 LOAD_RP 를 X/Y/Z 로 변위 제어 (기본 2 mm), 나머지 자유도 0 |
 | 재료 | `*Hyperelastic, ogden, n=3` (Abaqus 정의 μi, αi, D1~D3) |
-| 요소 | C3D10H (2차 사면체 하이브리드) |
+| 요소 | C3D8H (1차 육면체 하이브리드, YL_HEX_V6 순수 헥사, 2.0 mm). Tetra(C3D10H)는 `hypermesh.engine: "v10"` 일 때만 |
 | 기타 | NLGEOM=YES, Job 이름 `모델_E요소크기_SW스웨징_방향` 예: `M01_Ep2p0_SWm1p0_XP` |
 
 연구실 실행기 호환용으로 `rp`, `rp_node`, `sw` 셋 이름도 같이 만든다(`lab_aliases`).

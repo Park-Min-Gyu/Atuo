@@ -312,7 +312,7 @@ def check_mesh_sane(m: Mesh, min_elems: int = 50) -> None:
         span = (x.max(0) - x.min(0)).round(3).tolist()
         raise ValueError(
             f"메시 요소가 {n}개뿐입니다(최소 {min_elems}개). 범위 {span} mm. "
-            f"HyperMesh tetmesh 가 실패한 메시입니다 -> mesh/hm_log.txt 의 'tetmesh <...>' 줄을 확인하고 "
+            f"메시가 제대로 만들어지지 않았습니다 -> mesh 폴더의 로그를 확인하고 "
             f"--stage mesh --force 로 메시를 다시 만드세요.")
 
 

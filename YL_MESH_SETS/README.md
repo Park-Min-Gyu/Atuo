@@ -1,10 +1,10 @@
-# YL_MESH_SETS : 자동 메시(YL_V10) + 원점 + INNER/OUTER 노드 세트
+# YL_MESH_SETS : 자동 헥사 메시(YL_HEX_V6) + 원점 + INNER/OUTER 노드 세트
 
 해석(Abaqus) 없이 **메시와 노드 세트만** 만드는 묶음입니다. YL_AUTO 에서 이 부분만 떼어낸 것입니다.
 
 ## 하는 일
-1. `models/` 의 CAD(.stp/.step/.igs) 를 **YL_V10** (HyperMesh BatchMesher 스킨 -> 실패 시 V8) 로 메시하고,
-   2D 스킨이 합격하면 같은 HyperMesh 세션에서 Tetra(C3D10H) + INP 까지 만듭니다.
+1. `models/` 의 CAD(.stp/.step/.igs) 를 **YL_HEX_V6** (HyperMesh SolidMap 순수 헥사, C3D8H) 로 메시합니다.
+   (설정에서 `engine` 을 `v10` 으로 바꾸면 YL_V10 Tetra)
    이미 메시한 `.inp` 를 넣으면 메시 단계는 건너뜁니다.
 2. 관통 구멍(보어)으로 **축을 찾아 +Y 로 돌리고, 보어 중심을 원점 (0,0,0)** 으로 옮깁니다 (원통이 아니어도 됨).
 3. **INNER** (보어 벽) / **OUTER** (바깥 슬리브에 닿는 면) 노드를 자동으로 고릅니다.
@@ -18,10 +18,13 @@
 1. CAD 또는 .inp 를 `models/` 에 넣고
 2. `run_mesh_sets.bat` 더블클릭 (특정 모델만 : `run_mesh_sets.bat Part2 Part5`)
 
-## 헥사 메시 (선택)
-`config_mesh_sets.json` 의 `"engine": "hex"` 로 바꾸면 연구실 **YL_HEX_V6_PURE_2mm** (HyperMesh SolidMap, 순수 헥사 C3D8H, 2.0 mm 고정)를 먼저 시도합니다.
-- SolidMap 은 **매핑 가능한 솔리드**에서만 헥사를 만듭니다. 공극·필렛이 많은 부싱은 통째로는 안 되는 경우가 많습니다.
-- 헥사가 안 되면(헥사 0개, 매핑 안 된 솔리드, 웨지 섞임) `hex_fallback_tet: true` 일 때 YL_V10 Tetra 로 자동 전환합니다.
+## 헥사 메시 (기본)
+기본 설정(`"engine": "hex"`)은 연구실 **YL_HEX_V6_PURE_2mm** (HyperMesh SolidMap, 순수 헥사 C3D8H, 2.0 mm 고정) **만** 씁니다.
+- 헥사가 안 되면(헥사 0개, 매핑 안 된 솔리드, 웨지 섞임, INP 안 나옴) 그 모델은 **실패로 끝나고 Tetra 로 바꾸지 않습니다.**
+  로그에 이유가 나옵니다 (`mesh/_logs/hex_status.txt` 의 `N_HEX`, `N_UNMAP`).
+- SolidMap 은 **매핑 가능한 솔리드**에서만 헥사를 만듭니다. 공극·필렛이 많은 솔리드는 HyperMesh 에서 블록으로 나눠야 합니다.
+- `models/` 에 직접 넣은 `.inp` 도 헥사가 아니면 처리하지 않습니다.
+- Tetra 로 돌리고 싶을 때만 `"engine": "v10"`.
 - 원본 스크립트 `hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl` 은 그대로이며 HyperMesh 에서 단독 실행(설정 창)도 됩니다.
 
 ## 결과 (`out/<모델>/`)
