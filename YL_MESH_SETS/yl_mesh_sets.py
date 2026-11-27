@@ -26,7 +26,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from core import findexe, inp_mesh, sets_out, shape_general, yl_v10  # noqa: E402
+from core import findexe, inp_mesh, sets_out, shape_general, yl_hex, yl_v10  # noqa: E402
 
 CAD_EXT = {".stp", ".step", ".igs", ".iges", ".hm"}
 
@@ -47,6 +47,17 @@ def mesh_model(cfg, src: Path, name: str, mdir: Path) -> Path:
     if not exe:
         raise RuntimeError("hmbatch.exe 를 못 찾음 -> config 의 hypermesh.exe 에 전체 경로를 적어 주세요")
     hm["exe"] = exe
+    if str(cfg.get("engine", "v10")).lower() == "hex":
+        # 연구실 YL_HEX_V6 (SolidMap 순수 헥사, 2.0 mm 고정, C3D8H). 안 되면 YL_V10 Tetra 로
+        hs = yl_hex.run_hex(hm, HERE / hm.get("hex_tcl", "hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl"), src, mdir / "mesh",
+                            name, float(cfg["elem_size"]), hm.get("hex_elem_type", "C3D8H"))
+        if hs.get("STATUS") == "OK":
+            log(f"[{name}] YL_HEX 헥사 메시 성공 : Hex {hs.get('N_HEX')}개 ({hs.get('elapsed_s')}s)")
+            return Path(hs["INP_FILE"])
+        log(f"[{name}] 헥사 메시 실패 -> {hs.get('MESSAGE', '')}")
+        if not hm.get("hex_fallback_tet", True):
+            raise RuntimeError(f"헥사 메시 실패: {hs.get('MESSAGE', '')[:300]}")
+        log(f"[{name}] YL_V10 Tetra 로 넘어갑니다")
     st = yl_v10.run_v10(hm, HERE / hm.get("v10_ps1", "hypermesh/YL_V10/YL_V10.ps1"), src, mdir / "mesh", name,
                         float(cfg["elem_size"]), cfg.get("elem_type", "C3D10H"), bool(cfg.get("fixed_size", True)))
     log(f"[{name}] YL_V10 엔진={st.get('ENGINE')} 2D 합격={st.get('PASS2D')} Tria={st.get('N_TRIA')} "

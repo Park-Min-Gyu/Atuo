@@ -33,7 +33,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from core import findexe, inp_mesh, inp_writer, ogden, results, runners, shape_general, yl_v10  # noqa: E402
+from core import findexe, inp_mesh, inp_writer, ogden, results, runners, shape_general, yl_hex, yl_v10  # noqa: E402
 
 STAGES = ["mesh", "build", "run", "extract", "report"]
 CAD_EXT = {".stp", ".step", ".igs", ".iges", ".x_t", ".x_b", ".catpart", ".prt", ".sat", ".hm"}
@@ -126,6 +126,16 @@ def jobs_for(cfg, tag):
 
 # ---------------------------------------------------------------------------
 def stage_mesh(cfg, m, es, tag_dir, force):
+    st = _stage_mesh(cfg, m, es, tag_dir, force)
+    # [v24] 헥사가 안 돼서 Tetra 로 만든 메시 : 다음 실행 때 헥사를 매번 다시 시도하지 않도록 표시
+    if (str(cfg["hypermesh"].get("engine", "v10")).lower() == "hex" and st.get("STATUS") == "OK"
+            and not str(st.get("ALGO", "")).startswith("YL_HEX") and not st.get("HEX_FAILED")
+            and Path(m["file"]).suffix.lower() != ".inp"):
+        _mark_hex_failed(tag_dir / "mesh", "hex failed -> tetra fallback")
+    return st
+
+
+def _stage_mesh(cfg, m, es, tag_dir, force):
     src = Path(m["file"])
     mesh_dir = tag_dir / "mesh"
     out_inp = mesh_dir / f"{m['name']}_hm.inp"
@@ -142,7 +152,12 @@ def stage_mesh(cfg, m, es, tag_dir, force):
         if st.get("STATUS") == "OK" and ok and int(st.get("FIXED_SIZE", 0) or 0) != want_fixed:
             ok = False
             log(f"[{m['name']}] 메시 크기 설정(fixed_size={want_fixed})이 이전 메시와 달라 다시 메시합니다")
-        want_v10 = str(cfg["hypermesh"].get("engine", "v10")).lower() == "v10"
+        eng_now = str(cfg["hypermesh"].get("engine", "v10")).lower()
+        want_v10 = eng_now == "v10"
+        if st.get("STATUS") == "OK" and ok and eng_now == "hex" and not (str(st.get("ALGO", "")).startswith("YL_HEX")
+                                                                       or st.get("HEX_FAILED")):
+            ok = False
+            log(f"[{m['name']}] 이전 메시는 Tetra({st.get('ALGO', '?')}) -> 헥사(YL_HEX)로 다시 메시합니다")
         if st.get("STATUS") == "OK" and ok and want_v10 and not str(st.get("ALGO", "")).startswith(("YL_V10", "GMSH", "ROBUST")):
             ok = False
             log(f"[{m['name']}] 이전 메시는 예전 엔진({st.get('ALGO', '?')})으로 만든 것 -> YL_V10 으로 다시 메시합니다")
@@ -163,6 +178,24 @@ def stage_mesh(cfg, m, es, tag_dir, force):
             return gs
         log(f"[{m['name']}] gmsh 메시 실패 ({gs.get('MESSAGE', '')}) -> HyperMesh 로 시도")
     engine = str(hm.get("engine", "v10")).lower()
+    hex_fail = ""
+    if engine == "hex":
+        # [v24] 연구실 YL_HEX_V6 (SolidMap 순수 헥사, C3D8H). 안 되면 Tetra(YL_V10 -> gmsh -> TetWild)로
+        hs = yl_hex.run_hex(hm, resolve(cfg, hm.get("hex_tcl", "hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl")), src,
+                            mesh_dir, m["name"], es, hm.get("hex_elem_type", "C3D8H"))
+        if es != 2.0:
+            log(f"[{m['name']}] 참고: YL_HEX 스크립트는 요소크기 2.0 mm 고정입니다 (설정값 {es} mm 는 Tetra 로 갈 때만 적용)")
+        if hs.get("STATUS") == "OK":
+            log(f"[{m['name']}] 헥사 메시 성공 : Hex {hs.get('N_HEX')}개, 솔리드 {hs.get('N_SOLIDS')}개 ({hs.get('elapsed_s')}s)")
+            return hs
+        hex_fail = hs.get("MESSAGE", "")
+        log(f"[{m['name']}] 헥사 메시 실패 -> {hex_fail}")
+        for l in hs.get("LOG_TAIL", [])[-3:]:
+            log(f"[{m['name']}]   hex| {l}")
+        if not hm.get("hex_fallback_tet", True):
+            return hs
+        log(f"[{m['name']}] Tetra 메셔로 넘어갑니다 (hypermesh.hex_fallback_tet = true)")
+        engine = "v10"
     if engine == "v10":
         # [v20] 연구실 YL_V10 (BatchMesher 스킨 -> 실패 시 V8 -> 같은 세션에서 Tetra + INP)
         ps1 = resolve(cfg, hm.get("v10_ps1", "hypermesh/YL_V10/YL_V10.ps1"))
@@ -204,6 +237,13 @@ def stage_mesh(cfg, m, es, tag_dir, force):
         for l in rs.get("LOG_TAIL", [])[-4:]:
             log(f"[{m['name']}]   robust| {l}")
     return st
+
+
+def _mark_hex_failed(mesh_dir: Path, why: str):
+    f = mesh_dir / "hm_status.txt"
+    if f.exists():
+        with open(f, "a", encoding="utf-8") as fh:
+            fh.write(f"HEX_FAILED={why.replace(chr(10), ' ')[:300] or 1}\n")
 
 
 def stage_build(cfg, m, es, tag, tag_dir, mat, dialect):

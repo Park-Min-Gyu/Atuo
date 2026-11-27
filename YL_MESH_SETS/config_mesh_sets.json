@@ -3,20 +3,27 @@
  "models_dir": "models",
  "out_dir": "out",
  "elem_size": 2.0,
+ "engine": "v10",
+ "_comment_engine": "engine: v10 (YL_V10 Tetra) | hex (YL_HEX_V6 순수 헥사 C3D8H, 2.0 mm 고정, 안 되면 Tetra)",
  "elem_type": "C3D10H",
  "fixed_size": true,
  "upgrade_tet4": true,
  "repair_quality": true,
  "hypermesh": {
   "exe": "auto",
-  "args": ["-tcl"],
+  "args": [
+   "-tcl"
+  ],
   "timeout_min": 60,
   "start_menu_dir": "C:/ProgramData/Microsoft/Windows/Start Menu/Programs/Altair 2019",
   "v10_ps1": "hypermesh/YL_V10/YL_V10.ps1",
   "v10_aspect": 5.0,
   "v10_v8_fallback": true,
   "v10_fillet_rows": "altair",
-  "_comment": "exe: auto 면 시작 메뉴 -> C:/Program Files/Altair/2019/hm/bin/win64/hmbatch.exe 순으로 찾음. 못 찾으면 전체 경로를 적거나 set YL_HMBATCH=경로"
+  "_comment": "exe: auto 면 시작 메뉴 -> C:/Program Files/Altair/2019/hm/bin/win64/hmbatch.exe 순으로 찾음. 못 찾으면 전체 경로를 적거나 set YL_HMBATCH=경로",
+  "hex_tcl": "hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl",
+  "hex_elem_type": "C3D8H",
+  "hex_fallback_tet": true
  },
  "geometry": {
   "shape_mode": "general",

@@ -112,12 +112,21 @@ def pick_bore(fp: dict):
     return min(cand, key=lambda h: float(np.linalg.norm(h["centroid"] - fp["centroid"])))
 
 
+def _face_tris(faces, family):
+    """경계면 -> 삼각형 (그림자 계산용). [v24] hex8 의 사각형 면은 삼각형 2 개로 나눈다
+    (예전에는 앞의 3 절점만 써서 사각형의 절반만 그림자에 들어갔음)."""
+    if family == "hex8":
+        q = np.array([f[:4] for f in faces])
+        return np.vstack([q[:, [0, 1, 2]], q[:, [0, 2, 3]]])
+    return np.array([f[:3] for f in faces])
+
+
 # ---------------------------------------------------------------------------
 # 1) 축 찾기
 # ---------------------------------------------------------------------------
 def find_axis(m: Mesh, faces, nrm, area, axis: str = "auto") -> tuple[np.ndarray, dict]:
     x = m.xyz
-    tri = np.array([f[:3] for f in faces])
+    tri = _face_tris(faces, m.family)
     span = float(np.linalg.norm(x.max(0) - x.min(0)))
     cell = max(span / 400.0, 1e-6)
     named = {"X": np.array([1.0, 0, 0]), "Y": np.array([0, 1.0, 0]), "Z": np.array([0, 0, 1.0])}
@@ -166,6 +175,7 @@ def setup_general(m: Mesh, axis: str = "auto", center: str = "auto", cos_min: fl
                   inner_tol: float = 0.5, outer_tol: float = 0.5, inner_mode: str = "connected",
                   swage_mode: str = "auto", outer_mode: str = "hull") -> tuple[dict, SetResult]:
     faces, nrm, cen, area = inp_mesh.boundary_faces(m)
+    ncorner = 4 if m.family == "hex8" else 3          # 면의 꼭짓점 수 (hex 는 사각형)
     a, ax_info = find_axis(m, faces, nrm, area, axis)
     R = rotation_to_y(a)
     m.xyz = m.xyz @ R.T
@@ -173,7 +183,7 @@ def setup_general(m: Mesh, axis: str = "auto", center: str = "auto", cos_min: fl
     cen = cen @ R.T
     ax_info["rotation"] = R.tolist()
     x = m.xyz
-    tri = np.array([f[:3] for f in faces])
+    tri = _face_tris(faces, m.family)
 
     # 정밀 그림자 (XZ 평면) : 칸 크기 = 허용오차의 절반 (큰 모델은 최대 1500칸)
     span = float(max(np.ptp(x[:, 0]), np.ptp(x[:, 2])))
@@ -254,13 +264,13 @@ def setup_general(m: Mesh, axis: str = "auto", center: str = "auto", cos_min: fl
         ok = lateral & (np.einsum("ij,ij->i", d2, to_c) > 0.0) & ((l_in == 0) | (l_in == bore["label"])) & ~sel_out
         node2f: dict = {}
         for i in np.where(ok)[0]:
-            for nd in faces[i][:3]:
+            for nd in faces[i][:ncorner]:
                 node2f.setdefault(nd, []).append(i)
         seen = set(np.where(seed)[0].tolist())
         stack = list(seen)
         while stack:
             i = stack.pop()
-            for nd in faces[i][:3]:
+            for nd in faces[i][:ncorner]:
                 for j in node2f.get(nd, ()):
                     if j not in seen:
                         seen.add(j)

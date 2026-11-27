@@ -172,6 +172,27 @@ def read_inp_mesh(path: str | Path, keep_elsets: list[str] | None = None) -> Mes
 # ---------------------------------------------------------------------------
 # 요소 검사 / 보정
 # ---------------------------------------------------------------------------
+HEX_TETS = [(0, 1, 3, 4), (1, 2, 3, 6), (1, 4, 5, 6), (3, 4, 6, 7), (1, 3, 4, 6)]   # hex8 -> 5 tet (부피 계산용)
+
+
+def _hex_vol(x, c):
+    """hex8 부피 (5 개 tet 로 나눠 합). 방향이 반대면 음수."""
+    return sum(_tet_vol(x, c[:, list(t)]) for t in HEX_TETS)
+
+
+def hex_scaled_jacobian(x, c):
+    """hex8 각 꼭짓점의 scaled Jacobian 중 최소 (정육면체 = 1, 0 이하 = 뒤집힘)"""
+    # 꼭짓점마다 이웃 3 개 (오른손 순서)
+    nb = [(1, 3, 4), (2, 0, 5), (3, 1, 6), (0, 2, 7), (7, 5, 0), (4, 6, 1), (5, 7, 2), (6, 4, 3)]
+    out = np.full(len(c), np.inf)
+    for k, (a, b, d) in enumerate(nb):
+        e1, e2, e3 = (x[c[:, a]] - x[c[:, k]], x[c[:, b]] - x[c[:, k]], x[c[:, d]] - x[c[:, k]])
+        det = np.einsum("ij,ij->i", e1, np.cross(e2, e3))
+        nrm = np.linalg.norm(e1, axis=1) * np.linalg.norm(e2, axis=1) * np.linalg.norm(e3, axis=1)
+        out = np.minimum(out, det / np.maximum(nrm, 1e-300))
+    return out
+
+
 def _tet_vol(x, c):
     a, b, cc, d = x[c[:, 0]], x[c[:, 1]], x[c[:, 2]], x[c[:, 3]]
     return np.einsum("ij,ij->i", b - a, np.cross(cc - a, d - a)) / 6.0
@@ -243,9 +264,15 @@ def fix_orientation(m: Mesh) -> None:
         if (v <= 0).any():
             raise ValueError(f"보정 후에도 체적<=0 인 요소 {int((v <= 0).sum())}개")
     else:
-        a, g = x[c[:, 0]], x[c[:, 6]]
-        if (np.einsum("ij,ij->i", x[c[:, 1]] - a, np.cross(x[c[:, 3]] - a, x[c[:, 4]] - a)) <= 0).any():
-            m.note("경고: hex8 일부 요소의 방향이 의심됩니다(자동 보정 안 함).")
+        # [v24] hex8 : 부피가 음수(거울상 순서)면 위/아래 면 순서를 뒤집어 바로잡음
+        v = _hex_vol(x, c)
+        neg = v < 0
+        if neg.any():
+            c[neg] = c[neg][:, [0, 3, 2, 1, 4, 7, 6, 5]]
+            m.note(f"음의 체적 hex {int(neg.sum())}개 절점 순서 반전")
+        sj = hex_scaled_jacobian(x, c)
+        if (sj <= 0).any():
+            m.note(f"경고: Jacobian 이 0 이하인(찌그러진) hex {int((sj <= 0).sum())}개")
 
 
 def upgrade_tet4_to_tet10(m: Mesh) -> None:
@@ -459,6 +486,14 @@ def remove_surface_slivers(m: Mesh, q_max: float = 0.02) -> int:
 def tet_quality(m: Mesh) -> dict:
     """품질 지표: 정규화 체적비(가장 나쁜 요소), tet10 중간절점 이탈률."""
     x, c = m.xyz, m.conn
+    if m.family == "hex8":
+        sj = hex_scaled_jacobian(x, c)
+        edges = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
+        L = np.stack([np.linalg.norm(x[c[:, i]] - x[c[:, j]], axis=1) for i, j in edges], axis=1)
+        return {"n_elem": int(len(c)), "vol_min": float(_hex_vol(x, c).min()),
+                "shape_q_min": float(sj.min()), "shape_q_p01": float(np.percentile(sj, 1)),
+                "n_q_below_0p1": int((sj < 0.1).sum()), "edge_len_mean": float(L.mean()),
+                "quality_measure": "hex scaled Jacobian (1 = 정육면체)"}
     if m.family not in ("tet4", "tet10"):
         return {}
     v = _tet_vol(x, c)
@@ -618,13 +653,13 @@ def classify_inner_outer(m: Mesh, cos_min: float = 0.6, inner_tol: float = 0.5, 
             ok = inward & (r <= r_lim)
             node2f = {}
             for i in np.where(ok)[0]:
-                for nd in faces[i][:3]:
+                for nd in faces[i][:(4 if m.family == 'hex8' else 3)]:
                     node2f.setdefault(nd, []).append(i)
             seen = set(np.where(sel_in)[0].tolist())
             stack = list(seen)
             while stack:
                 i = stack.pop()
-                for nd in faces[i][:3]:
+                for nd in faces[i][:(4 if m.family == 'hex8' else 3)]:
                     for j in node2f.get(nd, ()):
                         if j not in seen:
                             seen.add(j)
@@ -674,7 +709,7 @@ def classify_inner_outer(m: Mesh, cos_min: float = 0.6, inner_tol: float = 0.5, 
 def geometry_features(m: Mesh, sets: SetResult) -> dict:
     """머신러닝 학습용 형상 특징값."""
     x = m.xyz
-    v = np.abs(_tet_vol(x, m.conn)).sum() if m.family != "hex8" else float("nan")
+    v = np.abs(_tet_vol(x, m.conn)).sum() if m.family != "hex8" else float(np.abs(_hex_vol(x, m.conn)).sum())
     r = np.hypot(x[:, 0], x[:, 2])
     return {
         "volume_mm3": float(v),

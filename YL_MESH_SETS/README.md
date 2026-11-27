@@ -18,6 +18,12 @@
 1. CAD 또는 .inp 를 `models/` 에 넣고
 2. `run_mesh_sets.bat` 더블클릭 (특정 모델만 : `run_mesh_sets.bat Part2 Part5`)
 
+## 헥사 메시 (선택)
+`config_mesh_sets.json` 의 `"engine": "hex"` 로 바꾸면 연구실 **YL_HEX_V6_PURE_2mm** (HyperMesh SolidMap, 순수 헥사 C3D8H, 2.0 mm 고정)를 먼저 시도합니다.
+- SolidMap 은 **매핑 가능한 솔리드**에서만 헥사를 만듭니다. 공극·필렛이 많은 부싱은 통째로는 안 되는 경우가 많습니다.
+- 헥사가 안 되면(헥사 0개, 매핑 안 된 솔리드, 웨지 섞임) `hex_fallback_tet: true` 일 때 YL_V10 Tetra 로 자동 전환합니다.
+- 원본 스크립트 `hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl` 은 그대로이며 HyperMesh 에서 단독 실행(설정 창)도 됩니다.
+
 ## 결과 (`out/<모델>/`)
 | 파일 | 내용 |
 |---|---|
