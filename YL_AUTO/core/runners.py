@@ -184,6 +184,65 @@ def run_robust(r_cfg: dict, geom: Path, out_dir: Path, base: str, elem_size: flo
     return st
 
 
+def grid_hex_available() -> bool:
+    import importlib.util
+    return importlib.util.find_spec("OCP") is not None and importlib.util.find_spec("scipy") is not None
+
+
+def run_grid_hex(g_cfg: dict, geom: Path, out_dir: Path, base: str, elem_size: float = 2.0) -> dict:
+    """[v26] 자동 헥사 (격자 + 경계층, core/grid_hex.py). 블록으로 나누지 않은 솔리드도 순수 헥사(C3D8H)로.
+    별도 프로세스로 실행 (오래 걸리거나 죽어도 파이프라인은 계속)."""
+    from core.grid_hex import GRID_EXT
+    if Path(geom).suffix.lower() not in GRID_EXT:
+        return {"STATUS": "FAIL", "ALGO": "GRID_HEX", "MESSAGE": f"자동 헥사는 {Path(geom).suffix} 형식을 못 읽음 (STEP/IGES 만)"}
+    if not grid_hex_available():
+        return {"STATUS": "FAIL", "ALGO": "GRID_HEX",
+                "MESSAGE": "자동 헥사에 필요한 패키지 없음 -> 'pip install cadquery-ocp scipy' 후 다시 실행"}
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_inp = out_dir / f"{base}_hm.inp"
+    tmp_inp = out_dir / f"{base}_gridhex.inp"
+    png = out_dir / f"{base}_hexmesh.png"
+    for f in (tmp_inp, png):
+        if f.exists():
+            f.unlink()
+    script = Path(__file__).resolve().parent / "grid_hex.py"
+    opts = {k: g_cfg[k] for k in ("feature_angle", "max_attempts", "pillow_frac", "smooth_iters", "sj_accept", "sj_fail")
+            if k in g_cfg}
+    cmd = [sys.executable, str(script), str(geom), str(tmp_inp), str(float(elem_size)), str(png), json.dumps(opts)]
+    log_file = out_dir / "gridhex_console.log"
+    rc, dt = _run(cmd, out_dir, log_file, float(g_cfg.get("timeout_min", 30)) * 60)
+    res = {}
+    for line in _tail(log_file, 5):
+        if "GRIDHEX_RESULT " in line:
+            try:
+                res = json.loads(line.split("GRIDHEX_RESULT ", 1)[1])
+            except ValueError:
+                pass
+    n_hex = int(res.get("n_hex", 0) or 0)
+    ok = bool(res.get("ok")) and tmp_inp.exists() and n_hex >= 50
+    st = {"STATUS": "OK" if ok else "FAIL", "ALGO": "GRID_HEX", "ELEM_SIZE": elem_size, "N_HEX": n_hex,
+          "N_TET": n_hex, "N_TRIA": 0, "BAD_TRIA": 0, "SJ_MIN": res.get("sj_min", ""), "SJ_MEAN": res.get("sj_mean", ""),
+          "N_SJ_LT_0P2": res.get("n_sj_lt_0p2", ""), "VOLUME_MM3": res.get("volume_mm3", ""),
+          "CAD_VOLUME_MM3": res.get("cad_volume_mm3", ""), "VOLUME_ERR_PCT": res.get("volume_err_pct", ""),
+          "EDGE_MEAN": res.get("edge_mean", ""), "PICTURE": _p(png) if png.exists() else "",
+          "INP_FILE": _p(out_inp) if ok else "", "returncode": rc, "elapsed_s": round(dt, 1),
+          "MESSAGE": "" if ok else f"자동 헥사 실패 (rc={rc}): {res.get('error') or 'gridhex_console.log 확인'}"}
+    if ok:
+        if out_inp.exists():
+            out_inp.unlink()
+        tmp_inp.rename(out_inp)
+        status_file = out_dir / "hm_status.txt"
+        if status_file.exists():
+            keep = out_dir / "hm_status_yl_hex.txt"
+            if keep.exists():
+                keep.unlink()
+            status_file.rename(keep)
+        status_file.write_text("".join(f"{k}={v}\n" for k, v in st.items()), encoding="utf-8")
+    else:
+        st["LOG_TAIL"] = _tail(log_file, 8)
+    return st
+
+
 def tet_count_ok(st: dict, min_ratio: float = 0.25, min_abs: int = 50) -> tuple[bool, str]:
     """[v8] hm_status 의 N_TET 이 표면 Tria 수에 비해 충분한지 검사.
     (예전에는 N_TET=3 이어도 STATUS=OK 로 통과해서 build 단계에서 엉뚱한 오류가 났음)"""

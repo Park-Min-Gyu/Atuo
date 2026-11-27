@@ -148,7 +148,7 @@ def _stage_mesh(cfg, m, es, tag_dir, force):
         ok, why = runners.tet_count_ok(st, cfg["hypermesh"].get("tet_min_ratio", 0.25))
         # [v15] 2 mm 고정 설정이 바뀌었으면 예전 메시를 쓰지 않고 다시 만든다
         want_fixed = 1 if cfg["mesh"].get("fixed_size") else 0
-        is_hex_mesh = str(st.get("ALGO", "")).startswith("YL_HEX")
+        is_hex_mesh = str(st.get("ALGO", "")).startswith(("YL_HEX", "GRID_HEX"))
         if st.get("STATUS") == "OK" and ok and not is_hex_mesh and int(st.get("FIXED_SIZE", 0) or 0) != want_fixed:
             ok = False
             log(f"[{m['name']}] 메시 크기 설정(fixed_size={want_fixed})이 이전 메시와 달라 다시 메시합니다")
@@ -156,7 +156,7 @@ def _stage_mesh(cfg, m, es, tag_dir, force):
         want_v10 = eng_now == "v10"
         if st.get("STATUS") == "OK" and ok and eng_now == "hex" and not is_hex_mesh:
             ok = False
-            log(f"[{m['name']}] 이전 메시는 헥사가 아님({st.get('ALGO', '?')}) -> 헥사(YL_HEX)로 다시 메시합니다")
+            log(f"[{m['name']}] 이전 메시는 헥사가 아님({st.get('ALGO', '?')}) -> 헥사로 다시 메시합니다")
         if eng_now == "hex" and st.get("STATUS") == "OK" and ok:
             return st
         if st.get("STATUS") == "OK" and ok and want_v10 and not str(st.get("ALGO", "")).startswith(("YL_V10", "GMSH", "ROBUST")):
@@ -174,19 +174,40 @@ def _stage_mesh(cfg, m, es, tag_dir, force):
     g_cfg["fixed_size"] = hm["fixed_size"]
     engine = mesh_engine(cfg)
     if engine == "hex":
-        # [v25] 헥사 전용 : YL_HEX_V6 (SolidMap 순수 헥사, C3D8H, 2.0 mm 고정) 만 쓴다.
-        #       실패해도 Tetra 메셔(YL_V10 / gmsh / TetWild)로 넘어가지 않고 그 모델은 실패로 끝낸다.
-        hs = yl_hex.run_hex(hm, resolve(cfg, hm.get("hex_tcl", "hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl")), src,
-                            mesh_dir, m["name"], es, hm.get("hex_elem_type", "C3D8H"))
-        if es != 2.0:
-            log(f"[{m['name']}] 참고: YL_HEX 스크립트는 요소크기 2.0 mm 고정입니다 (config 의 {es} mm 는 쓰이지 않음)")
-        if hs.get("STATUS") == "OK":
-            log(f"[{m['name']}] 헥사 메시 성공 : Hex {hs.get('N_HEX')}개, 솔리드 {hs.get('N_SOLIDS')}개 ({hs.get('elapsed_s')}s)")
-        else:
-            log(f"[{m['name']}] 헥사 메시 실패 -> {hs.get('MESSAGE', '')}")
+        # [v26] 헥사 전용 (순수 헥사 C3D8H 만, Tetra 메셔는 쓰지 않음)
+        #   1) YL_HEX_V6 (HyperMesh SolidMap) : 매핑 가능한(블록으로 나눈) 솔리드면 이것으로 끝
+        #   2) 안 되면 자동 헥사 (core/grid_hex.py, 격자 + 경계층) : 블록으로 나누지 않은 솔리드도 헥사로
+        hs = None
+        if hm.get("exe"):
+            hs = yl_hex.run_hex(hm, resolve(cfg, hm.get("hex_tcl", "hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl")), src,
+                                mesh_dir, m["name"], es, hm.get("hex_elem_type", "C3D8H"))
+            if es != 2.0:
+                log(f"[{m['name']}] 참고: YL_HEX 스크립트는 요소크기 2.0 mm 고정입니다 (config 의 {es} mm 는 쓰이지 않음)")
+            if hs.get("STATUS") == "OK":
+                log(f"[{m['name']}] 헥사 메시 성공 (YL_HEX) : Hex {hs.get('N_HEX')}개, 솔리드 {hs.get('N_SOLIDS')}개 "
+                    f"({hs.get('elapsed_s')}s)")
+                return hs
+            log(f"[{m['name']}] YL_HEX(SolidMap) 헥사 안 됨 -> {hs.get('MESSAGE', '')}")
             for l in hs.get("LOG_TAIL", [])[-3:]:
                 log(f"[{m['name']}]   hex| {l}")
-        return hs
+        else:
+            log(f"[{m['name']}] HyperMesh 가 없어 YL_HEX 는 건너뜀")
+        if not hm.get("hex_auto", False):
+            # [v26] 자동 헥사(격자/단면 쓸기)는 아직 실험 기능 -> 기본은 꺼짐 (config 의 hypermesh.hex_auto 로 켬)
+            return hs or {"STATUS": "FAIL", "ALGO": "YL_HEX_V6", "MESSAGE": "HyperMesh 없음, hex_auto 꺼짐"}
+        log(f"[{m['name']}] 자동 헥사(격자 + 경계층, 블록 분할 불필요, 요소 {es} mm)로 메시합니다")
+        gs = runners.run_grid_hex(dict(cfg.get("hex_grid", {})), src, mesh_dir, m["name"], es)
+        if gs.get("STATUS") == "OK":
+            log(f"[{m['name']}] 헥사 메시 성공 (자동 헥사) : Hex {gs.get('N_HEX')}개, 최소 scaled Jacobian {gs.get('SJ_MIN')}"
+                f" (평균 {gs.get('SJ_MEAN')}), CAD 대비 부피 오차 {gs.get('VOLUME_ERR_PCT')} %, {gs.get('elapsed_s')}s"
+                f" -> 메시 그림 mesh/{m['name']}_hexmesh.png")
+            return gs
+        log(f"[{m['name']}] 자동 헥사 실패 -> {gs.get('MESSAGE', '')}")
+        for l in gs.get("LOG_TAIL", [])[-4:]:
+            log(f"[{m['name']}]   grid| {l}")
+        msg = "; ".join(x for x in ((hs or {}).get("MESSAGE", ""), gs.get("MESSAGE", "")) if x)
+        return {"STATUS": "FAIL", "ALGO": "HEX", "MESSAGE": msg, "N_HEX": 0,
+                "LOG_TAIL": list((hs or {}).get("LOG_TAIL", []))[-2:] + list(gs.get("LOG_TAIL", []))[-4:]}
     if str(cfg["mesh"].get("mesher", "hypermesh")).lower() == "gmsh":
         # [v14] gmsh 를 주 메셔로 (Netgen 최적화로 납작한 Tetra 가 적음). 실패하면 HyperMesh 로.
         gs = runners.run_gmsh(g_cfg, src, mesh_dir, m["name"], es)
@@ -613,12 +634,16 @@ def resolve_programs(cfg, solver, stages):
     need_hm = "mesh" in stages and any(Path(m["file"]).suffix.lower() != ".inp" for m in model_list(cfg))
     if need_hm:
         exe, how = findexe.find_hmbatch(cfg.get("hypermesh", {}))
-        if not exe:
+        if exe:
+            cfg["hypermesh"]["exe"] = _win(exe)
+            log(f"HyperMesh batch: {cfg['hypermesh']['exe']} ({how})")
+        elif mesh_engine(cfg) == "hex" and cfg["hypermesh"].get("hex_auto", False) and runners.grid_hex_available():
+            log("[경고] hmbatch.exe 를 못 찾음 -> YL_HEX(HyperMesh) 없이 자동 헥사(격자 + 경계층)로만 메시합니다")
+            cfg["hypermesh"]["exe"] = ""
+        else:
             log("[ERROR] hmbatch.exe 를 못 찾음 (check_env.py 결과 확인)")
             raise SystemExit("[ERROR] hmbatch.exe 를 못 찾았습니다. config 의 hypermesh.exe 에 전체 경로를 적어주세요 "
                              "(예: C:/Program Files/Altair/2019/hm/bin/win64/hmbatch.exe)")
-        cfg["hypermesh"]["exe"] = _win(exe)
-        log(f"HyperMesh batch: {cfg['hypermesh']['exe']} ({how})")
     if solver == "abaqus" and ({"run", "extract"} & set(stages)):
         cmd, how = findexe.find_abaqus(cfg.get("abaqus", {}))
         if not cmd:
@@ -713,8 +738,11 @@ def main():
                     if st.get("STATUS") != "OK":
                         for l in st.get("LOG_TAIL", []):
                             log(f"[{tag}]   | {l}")
-                        hint = ("헥사 전용 모드: 매핑 안 되는 솔리드는 HyperMesh 에서 블록으로 나누거나, "
-                                "직접 만든 헥사 .inp 를 models 폴더에 넣어 주세요."
+                        hint = (("헥사 전용 모드: YL_HEX 와 자동 헥사가 모두 실패했습니다. mesh 폴더의 gridhex_console.log 와 "
+                                 "*_hexmesh.png 를 보내 주세요."
+                                 if cfg.get("hypermesh", {}).get("hex_auto", False) else
+                                 "헥사 전용 모드: SolidMap 은 매핑 가능한 블록만 헥사로 만듭니다. HyperMesh 에서 솔리드를 블록으로 "
+                                 "나눠(Geom > Solid Edit > Trim) 저장한 CAD 나, 직접 만든 헥사 .inp 를 models 폴더에 넣어 주세요.")
                                 if mesh_engine(cfg) == "hex" else
                                 "급하면 HyperMesh GUI 에서 직접 메시한 .inp 를 models 폴더에 넣으면 메시 단계를 건너뜁니다.")
                         log(f"[{tag}] 메시 실패 -> 이 모델은 해석(ODB) 단계로 가지 않습니다. {hint}")

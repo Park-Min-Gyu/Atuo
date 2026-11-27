@@ -91,6 +91,12 @@ elif engine == "hex":
     else:
         print(f"  [NG] YL_HEX tcl 없음: {tcl}")
     print(f"  메시 엔진: 헥사 전용 ({hm_cfg.get('hex_elem_type', 'C3D8H')}, 2.0 mm 고정, Tetra 로 넘어가지 않음)")
+    # [v26] 자동 헥사 (실험 기능, 블록 분할 없이 헥사)
+    import importlib.util as _iu
+    need = [n for n in ("OCP", "scipy", "gmsh", "matplotlib") if _iu.find_spec(n) is None]
+    on = bool(hm_cfg.get("hex_auto", False))
+    print(f"  자동 헥사 (실험, hypermesh.hex_auto = {'true' if on else 'false'}): "
+          + ("필요한 패키지 모두 있음" if not need else f"없는 패키지 {need} -> pip install cadquery-ocp scipy gmsh matplotlib"))
     ok = ok and good
 else:
     tcl = cfg_path.parent / hm_cfg.get("tcl", "hypermesh/YL_V5_batch.tcl")
