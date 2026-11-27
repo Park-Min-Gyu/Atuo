@@ -12,8 +12,8 @@
   "engine": "hex",
   "hex_tcl": "hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl",
   "hex_elem_type": "C3D8H",
-  "hex_auto": false,
-  "_comment_hex_auto": "[v26 실험] true 면 YL_HEX(SolidMap)가 안 될 때 자동 헥사(core/grid_hex.py : 단면 사각형 메시를 축 방향으로 쌓고 겉면에 경계층을 넣어 CAD 에 맞춤, 블록 분할 불필요, 순수 C3D8H, 테트라 안 씀)를 시도. 얇은 고무막이 있는 형상은 아직 일부 요소가 뒤집혀 실패할 수 있어 기본은 false",
+  "hex_auto": true,
+  "_comment_hex_auto": "[v27] true(기본) : YL_HEX(SolidMap)가 안 되면 자동 헥사(core/grid_hex.py)를 시도. 축 방향으로 내려다본 단면을 사각형 메시로 만들어 축 방향으로 쌓고, 겉면에 경계층 헥사를 넣어 CAD 에 맞춤. 블록 분할 불필요, 순수 C3D8H, 테트라 안 씀. 솔리드가 여러 개(스너버 등)면 가장 큰 고무 본체만 메시. 품질 기준을 못 넘으면 그 모델은 실패로 끝남",
   "_comment_hex": "헥사 전용 : YL_HEX_V6 (SolidMap 순수 헥사, 2.0 mm 고정, C3D8H) 만 사용. 헥사가 안 되는 모델은 Tetra 로 바꾸지 않고 실패로 끝남 (매핑 안 되는 솔리드는 HyperMesh 에서 블록으로 나눠야 함). Tetra 로 돌리고 싶을 때만 engine 을 v10 으로",
   "v10_ps1": "hypermesh/YL_V10/YL_V10.ps1",
   "v10_aspect": 5.0,
@@ -34,8 +34,9 @@
  "hex_grid": {
   "timeout_min": 30,
   "max_attempts": 4,
+  "section_size_factor": 2.0,
   "feature_angle": 30.0,
-  "_comment": "자동 헥사(hex_auto) 설정. 시도 횟수 x 형상당 약 1~2분. 결과 그림 mesh/<모델>_hexmesh.png"
+  "_comment": "자동 헥사 설정. section_size_factor 2 = 단면 요소 약 2 mm (안 되면 1.5 -> 1 로 자동으로 잘게). 형상당 1~4 분. 결과 그림 mesh/<모델>_hexmesh.png"
  },
  "gmsh_fallback": {
   "enabled": true,

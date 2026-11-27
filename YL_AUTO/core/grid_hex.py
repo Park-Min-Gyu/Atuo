@@ -136,7 +136,28 @@ def _weld(V, F, tol=2e-4):
     return Vw, Fw, keep & (area > 1e-12)
 
 
-def cad_surface(src: str, deflection: float = 0.02, angular: float = 0.25) -> dict:
+def _solids(shape):
+    from OCP.TopAbs import TopAbs_SOLID
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.TopoDS import TopoDS
+    solid_of = getattr(TopoDS, "Solid_s", None) or TopoDS.Solid
+    out, e = [], TopExp_Explorer(shape, TopAbs_SOLID)
+    while e.More():
+        out.append(solid_of(e.Current()))
+        e.Next()
+    return out
+
+
+def _volume(shape):
+    from OCP.BRepGProp import BRepGProp
+    from OCP.GProp import GProp_GProps
+    g = GProp_GProps()
+    (getattr(BRepGProp, "VolumeProperties_s", None) or BRepGProp.VolumeProperties)(shape, g)
+    return abs(float(g.Mass()))
+
+
+def cad_surface(src: str, deflection: float = 0.02, angular: float = 0.25, solid: str = "largest") -> dict:
+    """solid = 'largest' : 솔리드가 여러 개면(예: 고무 본체 + 스너버) 가장 큰 것만 메시. 'all' : 전부"""
     from OCP.BRep import BRep_Tool
     from OCP.BRepMesh import BRepMesh_IncrementalMesh
     from OCP.TopAbs import TopAbs_FACE, TopAbs_REVERSED
@@ -147,12 +168,15 @@ def cad_surface(src: str, deflection: float = 0.02, angular: float = 0.25) -> di
     tri_of = getattr(BRep_Tool, "Triangulation_s", None) or BRep_Tool.Triangulation
     shape = _read_shape(src)
     vol = None
+    others = []
     try:
-        from OCP.BRepGProp import BRepGProp
-        from OCP.GProp import GProp_GProps
-        g = GProp_GProps()
-        (getattr(BRepGProp, "VolumeProperties_s", None) or BRepGProp.VolumeProperties)(shape, g)
-        vol = abs(float(g.Mass()))
+        sols = _solids(shape)
+        if len(sols) > 1 and solid == "largest":
+            vols = [_volume(x) for x in sols]
+            k = int(np.argmax(vols))
+            others = [round(v, 1) for i, v in enumerate(vols) if i != k]
+            shape = sols[k]
+        vol = _volume(shape)
     except Exception:
         pass
     BRepMesh_IncrementalMesh(shape, deflection, False, angular, True)
@@ -182,7 +206,8 @@ def cad_surface(src: str, deflection: float = 0.02, angular: float = 0.25) -> di
         raise RuntimeError("CAD 에서 삼각형을 하나도 만들지 못함")
     V, F, fid = np.vstack(Vs), np.vstack(Fs), np.concatenate(Is)
     V, F, keep = _weld(V, F)
-    return {"V": V, "F": F[keep], "fid": fid[keep], "n_face": n_face, "n_skip": n_skip, "volume": vol}
+    return {"V": V, "F": F[keep], "fid": fid[keep], "n_face": n_face, "n_skip": n_skip, "volume": vol,
+            "other_solids": others}
 
 
 def make_patches(V, F, fid, angle_deg=30.0, h=None) -> dict:
@@ -1973,6 +1998,9 @@ def mesh(src, out_inp, h=2.0, opts=None, log=print, png=None) -> dict:
     S = cad_surface(str(src), opts["deflection"], opts["angular"])
     V, F = S["V"], S["F"]
     log(f"CAD: 면 {S['n_face']}개 (삼각형화 실패 {S['n_skip']}개), 삼각형 {len(F)}개, CAD 부피 {S['volume']}")
+    if S.get("other_solids"):
+        log(f"솔리드가 {1 + len(S['other_solids'])}개 -> 가장 큰 고무 본체만 메시. 따로 떨어진 솔리드(스너버 등) 부피 "
+            f"{S['other_solids']} mm3 는 이 메시에 넣지 않음")
     P = make_patches(V, F, S["fid"], opts["feature_angle"], h)
     ax, ctr, bore = find_axis_center(V, F)
     planes = axial_planes(V, F, P["nrm"], P["area"], ax, h)
@@ -1995,8 +2023,10 @@ def mesh(src, out_inp, h=2.0, opts=None, log=print, png=None) -> dict:
             log(f"단면 경계를 못 만듦 ({e}) -> 정육면체 격자 방식만 사용")
     attempts = []
     if regions:
-        attempts += [("sweep", {"thr": 0.5, "s2": 1.0}), ("sweep", {"thr": 0.6, "s2": 1.0}),
-                     ("sweep", {"thr": 0.5, "s2": 0.75}), ("sweep", {"thr": 0.4, "s2": 1.0})]
+        # 단면 사각형 크기 배율 : 2 = 요소크기 h (2 mm), 1 = 경계 근처 h/2. 굵은 것부터 시도하고 안 되면 잘게
+        f2 = float(opts.get("section_size_factor", 2.0))
+        attempts += [("sweep", {"thr": 0.5, "s2": f2}), ("sweep", {"thr": 0.5, "s2": 0.75 * f2}),
+                     ("sweep", {"thr": 0.6, "s2": f2}), ("sweep", {"thr": 0.5, "s2": 0.5 * f2})]
     if method in ("auto", "cart") and not regions:
         attempts += [("cart", {"shift": 0.0, "thr": 0.5}), ("cart", {"shift": 0.5, "thr": 0.5}),
                      ("cart", {"shift": 0.0, "thr": 0.6}), ("cart", {"shift": 0.5, "thr": 0.4})]
@@ -2051,6 +2081,7 @@ def mesh(src, out_inp, h=2.0, opts=None, log=print, png=None) -> dict:
            "n_feature_nodes": best["n_feat_nodes"], "n_corner_nodes": best["n_corner_nodes"],
            "cells_added_for_manifold": best["added"], "cells_dropped_islands": best["dropped"],
            "bad_rays": best["bad_rays"], "attempt": tried, "elem_size": h, "n_cad_face_skip": S["n_skip"],
+           "other_solids_mm3": S.get("other_solids", []),
            "elapsed_s": round(time.time() - t0, 1)}
     if not res["ok"]:
         why = []

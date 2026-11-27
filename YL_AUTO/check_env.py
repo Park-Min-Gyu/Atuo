@@ -94,8 +94,8 @@ elif engine == "hex":
     # [v26] 자동 헥사 (실험 기능, 블록 분할 없이 헥사)
     import importlib.util as _iu
     need = [n for n in ("OCP", "scipy", "gmsh", "matplotlib") if _iu.find_spec(n) is None]
-    on = bool(hm_cfg.get("hex_auto", False))
-    print(f"  자동 헥사 (실험, hypermesh.hex_auto = {'true' if on else 'false'}): "
+    on = bool(hm_cfg.get("hex_auto", True))
+    print(f"  자동 헥사 (hypermesh.hex_auto = {'true' if on else 'false'}): "
           + ("필요한 패키지 모두 있음" if not need else f"없는 패키지 {need} -> pip install cadquery-ocp scipy gmsh matplotlib"))
     ok = ok and good
 else:

@@ -206,8 +206,8 @@ def run_grid_hex(g_cfg: dict, geom: Path, out_dir: Path, base: str, elem_size: f
         if f.exists():
             f.unlink()
     script = Path(__file__).resolve().parent / "grid_hex.py"
-    opts = {k: g_cfg[k] for k in ("feature_angle", "max_attempts", "pillow_frac", "smooth_iters", "sj_accept", "sj_fail")
-            if k in g_cfg}
+    opts = {k: g_cfg[k] for k in ("feature_angle", "max_attempts", "pillow_frac", "smooth_iters", "sj_accept", "sj_fail",
+                                  "section_size_factor", "method") if k in g_cfg}
     cmd = [sys.executable, str(script), str(geom), str(tmp_inp), str(float(elem_size)), str(png), json.dumps(opts)]
     log_file = out_dir / "gridhex_console.log"
     rc, dt = _run(cmd, out_dir, log_file, float(g_cfg.get("timeout_min", 30)) * 60)

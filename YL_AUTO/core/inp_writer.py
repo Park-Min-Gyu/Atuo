@@ -11,8 +11,11 @@ from pathlib import Path
 
 import numpy as np
 
+# [v26] CalculiX 에는 하이브리드(H) 요소가 없음. 헥사를 C3D8(완전적분)로 하면 거의 비압축 고무에서 체적 잠김으로
+#       약 25 % 딱딱해지고, C3D8I 는 CalculiX 에서 둘째 증분부터 발산했다. 감차적분 C3D8R 은 잠김 없이 수렴하고
+#       초기 강성이 C3D8I 와 비슷했으므로 C3D8R 을 쓴다 (Abaqus 실사용 INP 는 그대로 C3D8H).
 ABQ_TYPE = {"abaqus": {"tet10": "C3D10H", "tet4": "C3D4H", "hex8": "C3D8H"},
-            "ccx": {"tet10": "C3D10", "tet4": "C3D4", "hex8": "C3D8"}}
+            "ccx": {"tet10": "C3D10", "tet4": "C3D4", "hex8": "C3D8R"}}
 DIR_DOF = {"X": 1, "Y": 2, "Z": 3}
 
 

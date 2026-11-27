@@ -192,8 +192,8 @@ def _stage_mesh(cfg, m, es, tag_dir, force):
                 log(f"[{m['name']}]   hex| {l}")
         else:
             log(f"[{m['name']}] HyperMesh 가 없어 YL_HEX 는 건너뜀")
-        if not hm.get("hex_auto", False):
-            # [v26] 자동 헥사(격자/단면 쓸기)는 아직 실험 기능 -> 기본은 꺼짐 (config 의 hypermesh.hex_auto 로 켬)
+        if not hm.get("hex_auto", True):
+            # [v27] 자동 헥사(단면 쓸기 + 경계층)는 기본으로 켬. 끄려면 config 의 hypermesh.hex_auto = false
             return hs or {"STATUS": "FAIL", "ALGO": "YL_HEX_V6", "MESSAGE": "HyperMesh 없음, hex_auto 꺼짐"}
         log(f"[{m['name']}] 자동 헥사(격자 + 경계층, 블록 분할 불필요, 요소 {es} mm)로 메시합니다")
         gs = runners.run_grid_hex(dict(cfg.get("hex_grid", {})), src, mesh_dir, m["name"], es)
@@ -637,7 +637,7 @@ def resolve_programs(cfg, solver, stages):
         if exe:
             cfg["hypermesh"]["exe"] = _win(exe)
             log(f"HyperMesh batch: {cfg['hypermesh']['exe']} ({how})")
-        elif mesh_engine(cfg) == "hex" and cfg["hypermesh"].get("hex_auto", False) and runners.grid_hex_available():
+        elif mesh_engine(cfg) == "hex" and cfg["hypermesh"].get("hex_auto", True) and runners.grid_hex_available():
             log("[경고] hmbatch.exe 를 못 찾음 -> YL_HEX(HyperMesh) 없이 자동 헥사(격자 + 경계층)로만 메시합니다")
             cfg["hypermesh"]["exe"] = ""
         else:
@@ -740,7 +740,7 @@ def main():
                             log(f"[{tag}]   | {l}")
                         hint = (("헥사 전용 모드: YL_HEX 와 자동 헥사가 모두 실패했습니다. mesh 폴더의 gridhex_console.log 와 "
                                  "*_hexmesh.png 를 보내 주세요."
-                                 if cfg.get("hypermesh", {}).get("hex_auto", False) else
+                                 if cfg.get("hypermesh", {}).get("hex_auto", True) else
                                  "헥사 전용 모드: SolidMap 은 매핑 가능한 블록만 헥사로 만듭니다. HyperMesh 에서 솔리드를 블록으로 "
                                  "나눠(Geom > Solid Edit > Trim) 저장한 CAD 나, 직접 만든 헥사 .inp 를 models 폴더에 넣어 주세요.")
                                 if mesh_engine(cfg) == "hex" else

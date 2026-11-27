@@ -1,3 +1,4 @@
+> v27 (2026-11-27): 자동 헥사 기본 사용(`hypermesh.hex_auto: true`), 새 MID 부싱 4개 자동 헥사 메시·해석 완료 - `수정내역_v27.md` 참고
 > v26 (2026-11-27): 헥사 0개 원인 정리(SolidMap 은 블록으로 나눈 솔리드만) + 자동 헥사 실험 기능 `hypermesh.hex_auto` (기본 꺼짐) - `수정내역_v26.md` 참고
 > v25 (2026-11-27): **헥사 전용** - 메시는 YL_HEX_V6 순수 헥사(C3D8H)만 사용, Tetra 로 넘어가는 동작 완전 삭제 - `수정내역_v25.md` 참고
 > v24 (2026-11-27): 헥사 메시 YL_HEX_V6 엔진 추가 - `수정내역_v24.md` 참고 (v24 에 있던 'Tetra 로 넘어가기'는 v25 에서 삭제)
@@ -26,7 +27,8 @@
 ```
 CAD(.stp 등) ──► HyperMesh 배치 (YL_HEX_V6_PURE_2mm.tcl = 연구실 헥사 메시, SolidMap)
                   └► 순수 헥사 C3D8H, 2.0 mm 고정 → Abaqus INP 출력
-                     (헥사가 안 되는 모델은 실패로 끝남. Tetra 로 넘어가지 않음)
+                     SolidMap 이 안 되면 자동 헥사 (core/grid_hex.py : 단면 쓸기 + 경계층, 블록 분할 불필요)
+                     (둘 다 안 되는 모델은 실패로 끝남. Tetra 로 넘어가지 않음)
              ──► Python: 메시 검사·보정 → 축 +Y 정렬 → INNER/OUTER 자동 선택 → LOAD_RP(0,0,0)
                   └► 메시 전용 INP + Job INP (스웨징 5단계 × X/Y/Z)
              ──► Abaqus 실행 (.odb) → abaqus python 으로 ODB 에서 LOAD_RP 하중-변위 추출
@@ -44,6 +46,7 @@ CAD(.stp 등) ──► HyperMesh 배치 (YL_HEX_V6_PURE_2mm.tcl = 연구실 헥
 | `collect_logs.py` | 실행 후 점검용 파일만 zip 으로 묶음 (ODB 제외, 이 파일만 보내면 됨) |
 | `hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl` | 연구실 헥사 메시 원본 (**기본 메시 엔진**, HyperMesh 에서 단독 실행도 가능) |
 | `core/yl_hex.py` | 헥사 메시 실행 래퍼 (설정 창 없이 hmbatch 로 '헥사 + 3D' 실행, 결과 판정) |
+| `core/grid_hex.py` | 자동 헥사 (블록 분할 없이 순수 헥사 : 단면 사각형 메시를 축 방향으로 쌓고 경계층으로 CAD 에 맞춤) |
 | `hypermesh/YL_V10/`, `hypermesh/YL_V5_batch.tcl` | Tetra 메셔 (`hypermesh.engine` 을 `v10` 으로 직접 적었을 때만 사용) |
 | `core/inp_mesh.py` | INP 읽기, 요소 검사·보정, 축 정렬, INNER/OUTER 선택 |
 | `core/ogden.py` | Ogden N=3 피팅(시험데이터)과 Drucker 안정성 점검 |
