@@ -32,11 +32,11 @@
   "_comment_v8": "defeature: 폭<small_w_ratio*요소크기 이고 최대모서리<small_maxlen_ratio*요소크기 인 작은 면(양각 글자 등)의 모서리를 suppress 해서 무시. tet_min_ratio: Tetra 수 >= 이 비율*표면Tria 수 여야 메시 합격"
  },
  "hex_grid": {
-  "timeout_min": 30,
-  "max_attempts": 4,
+  "timeout_min": 60,
+  "max_attempts": 7,
   "section_size_factor": 2.0,
   "feature_angle": 30.0,
-  "_comment": "자동 헥사 설정. section_size_factor 2 = 단면 요소 약 2 mm (안 되면 1.5 -> 1 로 자동으로 잘게). 형상당 1~4 분. 결과 그림 mesh/<모델>_hexmesh.png"
+  "_comment": "자동 헥사 설정. section_size_factor 2 = 단면 요소 약 2 mm. 시도 순서 : 2 mm -> 1.5 mm -> 오목 모서리 둥글게(1.5/2/1 mm) -> 기준 0.6 -> 1 mm. 좋은 결과가 나오면 바로 멈춤. 형상당 1~15 분. 결과 그림 mesh/<모델>_hexmesh.png"
  },
  "gmsh_fallback": {
   "enabled": true,

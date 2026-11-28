@@ -47,9 +47,9 @@ DEFAULTS = {
     "pillow_frac": 0.4,      # 경계층 두께 목표 (요소크기 배수)
     "smooth_iters": 25,
     "surf_iters": 8,
-    "sj_accept": 0.20,       # 이 품질 이상이면 더 시도하지 않음
+    "sj_accept": 0.15,       # 이 품질 이상이면 더 시도하지 않음 (v27.3 : 0.20 -> 0.15, 0.198 같은 결과에서 시간 낭비 방지)
     "sj_fail": 0.02,         # 최선의 시도도 이보다 나쁘면 실패 (Abaqus 가 거부할 수준)
-    "max_attempts": 4,
+    "max_attempts": 7,
 }
 
 # 칸의 8 꼭짓점 (Abaqus C3D8 순서: 아래 1-2-3-4, 위 5-6-7-8)
@@ -231,7 +231,7 @@ def cad_surface(src: str, deflection: float = 0.02, angular: float = 0.25, solid
             "other_solids": others}
 
 
-def make_patches(V, F, fid, angle_deg=30.0, h=None) -> dict:
+def make_patches(V, F, fid, angle_deg=30.0, h=None, concave_smooth=False) -> dict:
     """매끈하게 이어지는 CAD 면을 패치로 묶고, 패치 사이의 날카로운 모서리(삼각형 변)를 돌려줌"""
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
@@ -252,6 +252,11 @@ def make_patches(V, F, fid, angle_deg=30.0, h=None) -> dict:
     t1, t2, ev = Et[s2], Et[s2 + 1], E[s2]
     f1, f2 = fid[t1], fid[t2]
     ang = np.degrees(np.arccos(np.clip(np.abs(np.einsum("ij,ij->i", nrm[t1], nrm[t2])), 0.0, 1.0)))
+    if concave_smooth:
+        # [v27.3] 오목한 모서리(안쪽으로 꺾인 곳)는 날카로운 모서리로 보지 않음 -> 경계층이 그 모서리를 둥글게 지나감
+        cen = T.mean(axis=1)
+        concave = np.einsum("ij,ij->i", cen[t2] - cen[t1], nrm[t1]) > 0
+        ang = np.where(concave, 0.0, ang)
     nf = int(fid.max()) + 1
     d = f1 != f2
     key = np.minimum(f1, f2)[d] * nf + np.maximum(f1, f2)[d]
@@ -725,6 +730,74 @@ def section_regions(V, F, ax, h, res=0.1):
     return regions, fp
 
 
+def internal_walls(V, F, ax, regions, fp, h, zs=None, dtol=0.5):
+    """[v27.3] 단면 안쪽 벽 : 축 방향 가운데 단면의 경계 중 그림자(모든 단면의 합) 경계와 떨어져 있는 부분.
+    예) 얇은 바깥 링 바깥면 (끝의 립이 링보다 바깥으로 나와 있어 그림자 경계와 다름).
+    단면 사각형 메시가 이 선을 따라가게 하면 링-립이 꺾이는 모서리에서 계단이 생기지 않는다."""
+    from scipy.spatial import cKDTree
+    o = [k for k in range(3) if k != ax]
+    lo3, hi3 = V.min(0), V.max(0)
+    if zs is None:
+        zs = [0.5 * (lo3[ax] + hi3[ax]) + 0.013 * h]
+    g = fp["grid"]
+    ii, jj = np.nonzero(g)
+    if not len(ii):
+        return []
+    P2 = fp["lo"] + (np.stack([ii, jj], 1) + 0.5) * fp["cell"]
+    ins, valid = _bucket_rays(V, F, o, ax, P2, np.asarray(zs, float), cell=max(1.0, 4 * fp["cell"]))
+    # 경계 점 (그림자 경계 전체를 0.1 mm 간격으로)
+    bpts = []
+    for outer, holes in regions:
+        for Q in [outer] + holes:
+            C = np.vstack([Q, Q[:1]])
+            for a, b in zip(C[:-1], C[1:]):
+                n = max(1, int(np.ceil(np.hypot(*(b - a)) / 0.1)))
+                bpts.append(a + (b - a) * (np.arange(n) / n)[:, None])
+    btree = cKDTree(np.vstack(bpts))
+    walls = []
+    for k in range(len(zs)):
+        mask = np.zeros_like(g)
+        mask[ii, jj] = ins[:, k] & valid
+        for sg in _contour_segments(mask, fp["lo"], fp["cell"]):
+            if len(sg) < 8:
+                continue
+            closed = np.allclose(sg[0], sg[-1])
+            P = sg[:-1] if closed else sg
+            kk = len(P) // 2
+            Q = np.vstack([_rdp(P[:kk + 1], 0.04)[:-1], _rdp(np.vstack([P[kk:], P[:1]]), 0.04)[:-1]]) if closed else _rdp(P, 0.04)
+            d, _ = btree.query(Q)
+            inner = d > dtol
+            if inner.all() and closed:
+                if abs(_poly_area(Q)) > h * h:
+                    walls.append(("loop", Q))
+                continue
+            # 경계와 닿는 부분을 잘라낸 열린 선 (양 끝은 경계에서 1 mm 이상 떨어지게)
+            inner = d > max(dtol, 1.0)
+            n = len(Q)
+            if not inner.any():
+                continue
+            start = int(np.argmin(inner)) if closed else 0
+            idx = np.r_[np.arange(start, n), np.arange(0, start)] if closed else np.arange(n)
+            run = []
+            for i in list(idx) + [None]:
+                if i is not None and inner[i]:
+                    run.append(i)
+                    continue
+                if len(run) >= 3:
+                    C = Q[run]
+                    if np.hypot(*np.diff(C, axis=0).T).sum() >= 2 * h:
+                        walls.append(("chain", C))
+                run = []
+    return walls
+
+
+def _resample_chain(C, hb):
+    s = np.r_[0.0, np.cumsum(np.hypot(*np.diff(C, axis=0).T))]
+    k = max(1, int(round(s[-1] / hb)))
+    t = np.linspace(0, s[-1], k + 1)
+    return np.stack([np.interp(t, s, C[:, 0]), np.interp(t, s, C[:, 1])], 1)
+
+
 def _corner_split_resample(Q, hb, win=0.6, deg=40.0):
     """닫힌 경계를 꺾인 점(창 ±win mm 에서 deg 도 이상)에서 나눠 각 구간을 hb 간격으로 다시 나눔"""
     C = np.vstack([Q, Q[:1]])
@@ -761,7 +834,7 @@ def _corner_split_resample(Q, hb, win=0.6, deg=40.0):
     return np.vstack(out)
 
 
-def quad_mesh_2d(regions, h, size_factor=1.0):
+def quad_mesh_2d(regions, h, size_factor=1.0, walls=None):
     """단면을 순수 사각형으로 (gmsh : 사각형 위주 생성 -> 모두 사각형으로 세분). 반환 X2 (n,2), Q2 (m,4) 반시계"""
     import gmsh
     size = 2.0 * h * size_factor           # 세분하면 반으로 줄어듦
@@ -779,7 +852,28 @@ def quad_mesh_2d(regions, h, size_factor=1.0):
                 ln = [gmsh.model.geo.addLine(pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts))]
                 cls.append(gmsh.model.geo.addCurveLoop(ln))
             surf.append(gmsh.model.geo.addPlaneSurface(cls))
+        # [v27.3] 안쪽 벽 선을 단면 메시에 심기 (메시가 이 선을 따라감)
+        emb = {}
+        for kind, C in (walls or []):
+            ri = None
+            for r, (outer, holes) in enumerate(regions):
+                if _point_in_poly(C[0], outer) and not any(_point_in_poly(C[0], hq) for hq in holes):
+                    ri = r
+                    break
+            if ri is None:
+                continue
+            if kind == "loop":
+                R = _corner_split_resample(C, 0.5 * size)
+                pts = [gmsh.model.geo.addPoint(float(x), float(y), 0.0, size) for x, y in R]
+                ln = [gmsh.model.geo.addLine(pts[i], pts[(i + 1) % len(pts)]) for i in range(len(pts))]
+            else:
+                R = _resample_chain(C, 0.5 * size)
+                pts = [gmsh.model.geo.addPoint(float(x), float(y), 0.0, size) for x, y in R]
+                ln = [gmsh.model.geo.addLine(pts[i], pts[i + 1]) for i in range(len(pts) - 1)]
+            emb.setdefault(ri, []).extend(ln)
         gmsh.model.geo.synchronize()
+        for ri, ln in emb.items():
+            gmsh.model.mesh.embed(1, ln, 2, surf[ri])
         gmsh.option.setNumber("Mesh.Algorithm", 8)
         gmsh.option.setNumber("Mesh.RecombineAll", 1)
         gmsh.option.setNumber("Mesh.RecombinationAlgorithm", 1)
@@ -1972,10 +2066,10 @@ def _attempt_cart(S, SQ, CQ, corners, ax, ctr, planes, h, att, opts):
     return _result(X, conn, quads, bnd, n_cells, added, dropped, bad_rays, att)
 
 
-def _attempt_sweep(S, SQ, CQ, corners, ax, planes, h, att, opts, regions):
+def _attempt_sweep(S, SQ, CQ, corners, ax, planes, h, att, opts, regions, walls=None):
     V, F = S["V"], S["F"]
     lo, hi = V.min(0), V.max(0)
-    X2, Q2 = quad_mesh_2d(regions, h, att.get("s2", 1.0))
+    X2, Q2 = quad_mesh_2d(regions, h, att.get("s2", 1.0), walls if att.get("walls", True) else None)
     znodes = axis_nodes(lo[ax], hi[ax], planes, h)
     frac, bad_rays = column_fractions(V, F, ax, X2, Q2, znodes)
     sel, added, dropped = clean_columns(frac >= att["thr"], frac, X2, Q2)
@@ -2078,16 +2172,27 @@ def mesh(src, out_inp, h=2.0, opts=None, log=print, png=None) -> dict:
     if S.get("other_solids"):
         log(f"솔리드가 {1 + len(S['other_solids'])}개 -> 가장 큰 고무 본체만 메시. 따로 떨어진 솔리드(스너버 등) 부피 "
             f"{S['other_solids']} mm3 는 이 메시에 넣지 않음")
-    P = make_patches(V, F, S["fid"], opts["feature_angle"], h)
+    P = make_patches(V, F, S["fid"], opts["feature_angle"], h, bool(opts.get("concave_smooth", False)))
     ax, ctr, bore = find_axis_center(V, F)
     planes = axial_planes(V, F, P["nrm"], P["area"], ax, h)
     log(f"패치 {P['n_patch']}개 (날카로운 모서리 변 {len(P['feat_v'])}개), 축={'XYZ'[ax]} 보어 그림자 {bore:.0f} mm2, "
         f"중심=({ctr[0]:.3f}, {ctr[1]:.3f}, {ctr[2]:.3f}), 축에 수직인 평면 {len(planes)}개")
     Pr, own = refine(V, F, 0.5 * h)
-    SQ = SurfQuery(Pr, P["tpatch"][own], P["nrm"][own])
-    CQ = CurveQuery(V, P["feat_v"], P["feat_p"], 0.25 * h)
-    corners = find_corners(V, P["feat_v"], P["feat_p"])
+    ctx = {}
+
+    def geom_ctx(concave):
+        """패치/모서리선 묶음. concave=True : 오목한 모서리를 날카로운 모서리로 보지 않음 (경계층이 둥글게 지나감)"""
+        if concave not in ctx:
+            Pc = P if concave == bool(opts.get("concave_smooth", False)) else \
+                make_patches(V, F, S["fid"], opts["feature_angle"], h, concave)
+            ctx[concave] = (SurfQuery(Pr, Pc["tpatch"][own], Pc["nrm"][own]),
+                            CurveQuery(V, Pc["feat_v"], Pc["feat_p"], 0.25 * h),
+                            find_corners(V, Pc["feat_v"], Pc["feat_p"]), Pc)
+        return ctx[concave]
+
+    SQ, CQ, corners, _ = geom_ctx(bool(opts.get("concave_smooth", False)))
     regions = None
+    walls = []
     method = str(opts.get("method", "auto")).lower()
     import importlib.util
     if bore > 0 and method in ("auto", "sweep") and importlib.util.find_spec("gmsh") is None:
@@ -2095,14 +2200,26 @@ def mesh(src, out_inp, h=2.0, opts=None, log=print, png=None) -> dict:
         method = "cart"
     if bore > 0 and method in ("auto", "sweep"):
         try:
-            regions, _ = section_regions(V, F, ax, h)
+            regions, fp_sec = section_regions(V, F, ax, h)
+            try:
+                walls = internal_walls(V, F, ax, regions, fp_sec, h) if opts.get("walls", True) else []
+                if walls:
+                    log(f"단면 안쪽 벽 {len(walls)}개 (예: 바깥 링 바깥면) -> 단면 메시가 따라가게 함 "
+                        f"(닫힌 선 {sum(1 for k, _ in walls if k == 'loop')}개)")
+            except Exception as e:
+                walls = []
+                log(f"단면 안쪽 벽 찾기 실패 ({e}) -> 없이 진행")
         except Exception as e:  # 단면을 못 만들면 정육면체 격자 방식으로
             log(f"단면 경계를 못 만듦 ({e}) -> 정육면체 격자 방식만 사용")
     attempts = []
     if regions:
         # 단면 사각형 크기 배율 : 2 = 요소크기 h (2 mm), 1 = 경계 근처 h/2. 굵은 것부터 시도하고 안 되면 잘게
         f2 = float(opts.get("section_size_factor", 2.0))
+        # [v27.3] 3~5 번째 : 오목한 모서리를 둥글게 (바깥 링이 끝 립으로 꺾이는 형상에서 뒤집힘이 크게 줄어듦)
         attempts += [("sweep", {"thr": 0.5, "s2": f2}), ("sweep", {"thr": 0.5, "s2": 0.75 * f2}),
+                     ("sweep", {"thr": 0.5, "s2": 0.75 * f2, "concave": True}),
+                     ("sweep", {"thr": 0.5, "s2": f2, "concave": True}),
+                     ("sweep", {"thr": 0.5, "s2": 0.5 * f2, "concave": True}),
                      ("sweep", {"thr": 0.6, "s2": f2}), ("sweep", {"thr": 0.5, "s2": 0.5 * f2})]
     if method in ("auto", "cart") and not regions:
         attempts += [("cart", {"shift": 0.0, "thr": 0.5}), ("cart", {"shift": 0.5, "thr": 0.5}),
@@ -2120,7 +2237,15 @@ def mesh(src, out_inp, h=2.0, opts=None, log=print, png=None) -> dict:
         ta = time.time()
         try:
             if kind == "sweep":
-                r = _attempt_sweep(S, SQ, CQ, corners, ax, planes, h, att, opts, regions)
+                cc = bool(att.get("concave", opts.get("concave_smooth", False)))
+                SQa, CQa, ca, Pa = geom_ctx(cc)
+                if cc != bool(opts.get("concave_smooth", False)):
+                    P0 = geom_ctx(not cc)[3]
+                    if len(Pa["feat_v"]) == len(P0["feat_v"]) and Pa["n_patch"] == P0["n_patch"]:
+                        log(f"시도 {k + 1} 건너뜀 (오목한 날카로운 모서리가 없어 앞의 시도와 같음)")
+                        tried.append({"kind": kind, **att, "skipped": "same patches"})
+                        continue
+                r = _attempt_sweep(S, SQa, CQa, ca, ax, planes, h, att, opts, regions, walls)
             else:
                 r = _attempt_cart(S, SQ, CQ, corners, ax, ctr, planes, h, att, opts)
         except Exception as e:
