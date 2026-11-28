@@ -97,6 +97,23 @@ def mesh_engine(cfg) -> str:
     return str(cfg.get("hypermesh", {}).get("engine", "hex")).lower()
 
 
+def check_hex_auto(cfg):
+    """[v27.1] 자동 헥사가 꺼져 있으면 시작할 때 크게 알림.
+    v26 config 의 기본값(hex_auto=false, 실험 기능 설명)이 그대로 남아 있으면 v27 기본값(true)으로 실행한다."""
+    hm = cfg.setdefault("hypermesh", {})
+    if mesh_engine(cfg) != "hex":
+        return
+    if hm.get("hex_auto", True) is False and "[v26 실험]" in str(hm.get("_comment_hex_auto", "")):
+        hm["hex_auto"] = True
+        log("[알림] config 에 v26 의 기본값 hypermesh.hex_auto = false 가 남아 있어 v27 기본값(true)으로 실행합니다. "
+            "(SolidMap 이 안 되는 형상은 자동 헥사로 메시. 정말 끄려면 _comment_hex_auto 줄을 지우고 false 로 두세요)")
+    if hm.get("hex_auto", True):
+        log("메시: 헥사 전용 - YL_HEX(SolidMap) 를 먼저 시도하고, 안 되면 자동 헥사(블록 분할 불필요)로 메시합니다")
+    else:
+        log("[주의] 자동 헥사가 꺼져 있습니다 (config: hypermesh.hex_auto = false). SolidMap 이 안 되는 형상(블록으로 안 나눈 "
+            "부싱)은 메시 실패로 끝나고 해석을 하지 않습니다. 켜려면 hypermesh.hex_auto 를 true 로 바꾸세요")
+
+
 def model_list(cfg) -> list[dict]:
     models = list(cfg.get("models", []))
     pat = cfg.get("models_glob")
@@ -670,6 +687,7 @@ def main():
     global LOG_FILE
     LOG_FILE = work / "pipeline_log.txt"
     log(f"===== run_pipeline {a.config}  stage={a.stage}  only={a.only} =====")
+    check_hex_auto(cfg)
     check_models(cfg)
     resolve_programs(cfg, solver, stages)
 
@@ -741,8 +759,8 @@ def main():
                         hint = (("헥사 전용 모드: YL_HEX 와 자동 헥사가 모두 실패했습니다. mesh 폴더의 gridhex_console.log 와 "
                                  "*_hexmesh.png 를 보내 주세요."
                                  if cfg.get("hypermesh", {}).get("hex_auto", True) else
-                                 "헥사 전용 모드: SolidMap 은 매핑 가능한 블록만 헥사로 만듭니다. HyperMesh 에서 솔리드를 블록으로 "
-                                 "나눠(Geom > Solid Edit > Trim) 저장한 CAD 나, 직접 만든 헥사 .inp 를 models 폴더에 넣어 주세요.")
+                                 "헥사 전용 모드: SolidMap 이 이 형상을 매핑하지 못했고, 자동 헥사가 꺼져 있어(hypermesh.hex_auto = "
+                                 "false) 시도하지 않았습니다. config_abaqus.json 의 hypermesh.hex_auto 를 true 로 바꾸고 다시 실행하세요.")
                                 if mesh_engine(cfg) == "hex" else
                                 "급하면 HyperMesh GUI 에서 직접 메시한 .inp 를 models 폴더에 넣으면 메시 단계를 건너뜁니다.")
                         log(f"[{tag}] 메시 실패 -> 이 모델은 해석(ODB) 단계로 가지 않습니다. {hint}")
