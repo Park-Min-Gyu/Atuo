@@ -25,6 +25,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -40,15 +41,52 @@ CAD_EXT = {".stp", ".step", ".igs", ".iges", ".x_t", ".x_b", ".catpart", ".prt",
 
 
 LOG_FILE = None
+_LOG_LOCK = threading.Lock()      # [v27.5] 메시(본 스레드)와 Abaqus 실행(작업 스레드)이 동시에 로그를 씀
 
 
 def log(msg):
     line = time.strftime("[%H:%M:%S] ") + msg
-    print(line, flush=True)
-    if LOG_FILE is not None:
+    with _LOG_LOCK:
+        print(line, flush=True)
+        if LOG_FILE is not None:
+            try:
+                with open(LOG_FILE, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+            except OSError:
+                pass
+
+
+# [v27.5] auto_out/progress.txt : 모델마다 지금 어느 단계인지 한눈에 (메시 중 / 해석 대기 / Abaqus 실행 중 / 완료)
+PROGRESS: dict = {}
+PROGRESS_FILE = None
+_PROG_LOCK = threading.Lock()
+
+
+def progress(tag, **kw):
+    with _PROG_LOCK:
+        d = PROGRESS.setdefault(tag, {"mesh": "-", "run": "-"})
+        d.update({k: str(v) for k, v in kw.items()})
+        d["t"] = time.strftime("%H:%M:%S")
+        if PROGRESS_FILE is None:
+            return
+        w = max([len(t) for t in PROGRESS] + [10])
+        lines = [f"YL_AUTO 진행 상황 ({time.strftime('%Y-%m-%d %H:%M:%S')} 갱신, 실행이 끝나면 맨 아래에 '끝' 표시)", "",
+                 f"{'모델':<{w}}  | 메시                          | 해석"]
+        for t, v in PROGRESS.items():
+            lines.append(f"{t:<{w}}  | {v['mesh']:<29} | {v['run']}   ({v['t']})")
         try:
-            with open(LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
+            PROGRESS_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
+
+def progress_end(msg: str):
+    if PROGRESS_FILE is None:
+        return
+    with _PROG_LOCK:
+        try:
+            with open(PROGRESS_FILE, "a", encoding="utf-8") as f:
+                f.write(f"\n끝 ({time.strftime('%Y-%m-%d %H:%M:%S')}) : {msg}\n")
         except OSError:
             pass
 
@@ -151,6 +189,47 @@ def stage_mesh(cfg, m, es, tag_dir, force):
     return _stage_mesh(cfg, m, es, tag_dir, force)
 
 
+_FILE_SHA: dict = {}
+
+
+def _file_sha(p: Path) -> str:
+    p = Path(p)
+    if p not in _FILE_SHA:
+        try:
+            _FILE_SHA[p] = hashlib.sha1(p.read_bytes()).hexdigest()[:12]
+        except OSError:
+            _FILE_SHA[p] = "-"
+    return _FILE_SHA[p]
+
+
+def _hex_signature(cfg, src: Path, es: float, hm: dict) -> str:
+    """[v27.5] 헥사 메시 결과를 정하는 것들의 지문 : CAD 파일(크기, 수정 시각) + 메셔 코드 + 설정 + 요소 크기.
+    같으면 결과도 같으므로(자동 헥사는 매번 같은 결과) 지난번에 실패한 모델을 다시 시도하지 않는다."""
+    try:
+        fs = src.stat()
+        cad = f"{src.name}|{fs.st_size}|{int(fs.st_mtime)}"
+    except OSError:
+        cad = src.name
+    parts = [cad, _file_sha(HERE / "core" / "grid_hex.py"), _file_sha(HERE / "core" / "runners.py"),
+             _file_sha(resolve(cfg, hm.get("hex_tcl", "hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl"))),
+             json.dumps(cfg.get("hex_grid", {}), sort_keys=True), str(float(es)), str(bool(hm.get("exe"))),
+             str(bool(hm.get("hex_auto", True)))]
+    return hashlib.sha1("||".join(parts).encode()).hexdigest()[:16]
+
+
+def mesh_ready(cfg, m, tag_dir: Path) -> bool:
+    """[v27.5] 메시가 이미 있어서 바로 해석으로 갈 수 있는 모델인지 (처리 순서를 정하는 데만 씀)"""
+    if Path(m["file"]).suffix.lower() == ".inp":
+        return True
+    mesh_dir = tag_dir / "mesh"
+    if not (mesh_dir / f"{m['name']}_hm.inp").exists():
+        return False
+    st = runners.read_kv(mesh_dir / "hm_status.txt")
+    if st.get("STATUS") != "OK":
+        return False
+    return mesh_engine(cfg) != "hex" or str(st.get("ALGO", "")).startswith(("YL_HEX", "GRID_HEX"))
+
+
 def _stage_mesh(cfg, m, es, tag_dir, force):
     src = Path(m["file"])
     mesh_dir = tag_dir / "mesh"
@@ -195,6 +274,19 @@ def _stage_mesh(cfg, m, es, tag_dir, force):
         #   1) YL_HEX_V6 (HyperMesh SolidMap) : 매핑 가능한(블록으로 나눈) 솔리드면 이것으로 끝
         #   2) 안 되면 자동 헥사 (core/grid_hex.py, 격자 + 경계층) : 블록으로 나누지 않은 솔리드도 헥사로
         hs = None
+        memo_f = mesh_dir / "hex_fail.json"
+        sig = _hex_signature(cfg, src, es, hm)
+        if memo_f.exists() and not force:
+            try:
+                memo = json.loads(memo_f.read_text(encoding="utf-8"))
+            except ValueError:
+                memo = {}
+            if memo.get("sig") == sig:
+                log(f"[{m['name']}] 지난번({memo.get('time', '?')})에 같은 CAD 파일, 같은 메셔로 헥사 메시가 실패함 -> "
+                    f"다시 시도하지 않음 (같은 결과라 시간만 듦). 다시 하려면 --force 또는 mesh/hex_fail.json 삭제")
+                return {"STATUS": "FAIL", "ALGO": "HEX", "MESSAGE": "(지난번과 같은 실패) " + memo.get("message", ""),
+                        "N_HEX": 0, "LOG_TAIL": memo.get("log_tail", []), "SKIPPED_SAME": True}
+        mesh_dir.mkdir(parents=True, exist_ok=True)
         if hm.get("exe"):
             hs = yl_hex.run_hex(hm, resolve(cfg, hm.get("hex_tcl", "hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl")), src,
                                 mesh_dir, m["name"], es, hm.get("hex_elem_type", "C3D8H"))
@@ -203,6 +295,8 @@ def _stage_mesh(cfg, m, es, tag_dir, force):
             if hs.get("STATUS") == "OK":
                 log(f"[{m['name']}] 헥사 메시 성공 (YL_HEX) : Hex {hs.get('N_HEX')}개, 솔리드 {hs.get('N_SOLIDS')}개 "
                     f"({hs.get('elapsed_s')}s)")
+                if memo_f.exists():
+                    memo_f.unlink()
                 return hs
             log(f"[{m['name']}] YL_HEX(SolidMap) 헥사 안 됨 -> {hs.get('MESSAGE', '')}")
             for l in hs.get("LOG_TAIL", [])[-3:]:
@@ -218,13 +312,21 @@ def _stage_mesh(cfg, m, es, tag_dir, force):
             log(f"[{m['name']}] 헥사 메시 성공 (자동 헥사) : Hex {gs.get('N_HEX')}개, 최소 scaled Jacobian {gs.get('SJ_MIN')}"
                 f" (평균 {gs.get('SJ_MEAN')}), CAD 대비 부피 오차 {gs.get('VOLUME_ERR_PCT')} %, {gs.get('elapsed_s')}s"
                 f" -> 메시 그림 mesh/{m['name']}_hexmesh.png")
+            if memo_f.exists():
+                memo_f.unlink()
             return gs
         log(f"[{m['name']}] 자동 헥사 실패 -> {gs.get('MESSAGE', '')}")
         for l in gs.get("LOG_TAIL", [])[-4:]:
             log(f"[{m['name']}]   grid| {l}")
         msg = "; ".join(x for x in ((hs or {}).get("MESSAGE", ""), gs.get("MESSAGE", "")) if x)
-        return {"STATUS": "FAIL", "ALGO": "HEX", "MESSAGE": msg, "N_HEX": 0,
-                "LOG_TAIL": list((hs or {}).get("LOG_TAIL", []))[-2:] + list(gs.get("LOG_TAIL", []))[-4:]}
+        tail = list((hs or {}).get("LOG_TAIL", []))[-2:] + list(gs.get("LOG_TAIL", []))[-4:]
+        if gs.get("DETERMINISTIC_FAIL"):   # 품질 기준 탈락만 기록 (시간 초과/중간 종료는 다음에 다시 시도)
+            try:
+                memo_f.write_text(json.dumps({"sig": sig, "time": time.strftime("%Y-%m-%d %H:%M"), "message": msg,
+                                              "log_tail": tail}, ensure_ascii=False, indent=1), encoding="utf-8")
+            except OSError:
+                pass
+        return {"STATUS": "FAIL", "ALGO": "HEX", "MESSAGE": msg, "N_HEX": 0, "LOG_TAIL": tail}
     if str(cfg["mesh"].get("mesher", "hypermesh")).lower() == "gmsh":
         # [v14] gmsh 를 주 메셔로 (Netgen 최적화로 납작한 Tetra 가 적음). 실패하면 HyperMesh 로.
         gs = runners.run_gmsh(g_cfg, src, mesh_dir, m["name"], es)
@@ -612,6 +714,9 @@ def stage_run_one(cfg, solver, run_dir, j, rp_id, stages, force):
     else:
         finished = bool(st.get("completed"))
     if "run" in stages and (force or not finished):
+        old_csv = run_dir / f"{job}_RP.csv"      # [v27.5] 다시 해석하면 예전 결과 CSV 를 지우고 새로 추출
+        if old_csv.exists():
+            old_csv.unlink()
         if solver == "abaqus":
             st = runners.run_abaqus(cfg["abaqus"], run_dir, job)
         else:
@@ -701,6 +806,141 @@ def stage_report(cfg, work, model_infos):
 
 
 # ---------------------------------------------------------------------------
+# [v27.5] 실행 흐름 : 모델 하나의 메시와 INP 가 끝나면 그 모델의 Abaqus 해석을 바로 시작한다.
+#   예전에는 '모든 모델 메시 -> 그다음 모든 해석' 이라서, 자동 헥사가 모델당 수 분~수십 분 걸리는 지금은
+#   메시가 다 끝날 때까지(몇 시간) Abaqus 가 하나도 시작하지 않았고, 그 전에 창을 닫으면 해석이 전혀 없었다.
+# ---------------------------------------------------------------------------
+_RUN_LOCK = threading.Lock()
+_RUN_STATE = {"fail_shown": 0, "queued": 0, "running": 0, "done": 0}
+
+
+def check_previous_run(work: Path):
+    """지난 실행이 끝까지 갔는지, Abaqus 가 강제로 꺼진 흔적(.lck/.023/.SMABulk)이 있는지 알려 준다."""
+    sf = work / "run_state.json"
+    try:
+        prev = json.loads(sf.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        prev = None
+    if prev and not prev.get("finished"):
+        log(f"[주의] 지난 실행({prev.get('started', '?')} 시작)이 끝까지 가지 못하고 멈췄습니다 "
+            f"(실행 창을 닫았거나 Ctrl+C, PC 절전/재시작). 그때 돌던 Abaqus 해석은 이번에 다시 합니다.")
+    for d in sorted(work.glob("*/run")):
+        try:
+            left = [q for q in d.iterdir() if q.is_file() and (q.suffix.lower() in (".lck", ".023")
+                                                               or q.name.lower().endswith(".smabulk"))]
+        except OSError:
+            continue
+        if not left:
+            continue
+        t = time.strftime("%m-%d %H:%M", time.localtime(max(q.stat().st_mtime for q in left)))
+        jobs = sorted({q.name.split(".")[0] for q in left})
+        log(f"[{d.parent.name}] 지난번 Abaqus 가 정상 종료하지 못하고 꺼진 흔적 ({', '.join(jobs)}, {t}) "
+            f"-> 그 해석 결과는 불완전하므로 이번에 다시 합니다")
+        for q in left:          # 잠금/임시 파일은 지움 (남아 있으면 같은 Job 이 시작하지 못하거나 경고가 매번 반복됨)
+            try:
+                q.unlink()
+            except OSError:
+                pass
+        for j in jobs:
+            base = re.sub(r"_r\d+$", "", j)
+            stf = d / f"{base}_status.json"
+            try:
+                st = json.loads(stf.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            # 통합 Job 은 finished, Job 별 실행은 completed/started 로 '끝남' 을 판단 -> 모두 되돌려 다시 해석하게 함
+            st.update({"finished": False, "completed": False, "started": False, "interrupted": True})
+            try:
+                stf.write_text(json.dumps(st, indent=2, ensure_ascii=False), encoding="utf-8")
+            except OSError:
+                pass
+    try:
+        sf.write_text(json.dumps({"started": time.strftime("%Y-%m-%d %H:%M:%S"), "pid": os.getpid(),
+                                  "finished": False}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def mark_run_finished(work: Path):
+    sf = work / "run_state.json"
+    try:
+        st = json.loads(sf.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        st = {}
+    st.update({"finished": True, "ended": time.strftime("%Y-%m-%d %H:%M:%S")})
+    try:
+        sf.write_text(json.dumps(st), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _log_job_result(job, st, stages):
+    log(f"  {job}: completed={st.get('completed')} inc={st.get('n_increments')} "
+        f"t={st.get('elapsed_s')}s extracted={st.get('extracted', '-')} {st.get('errors') or ''}")
+    if "n_cases" in st:
+        njob = len(st.get("chain") or [1])
+        log(f"    통합 Job: 하중 케이스 {st['n_cases_done']}/{st['n_cases']} 개 완료"
+            + (f" (발산한 케이스를 건너뛰며 Job {njob}개로 나눠 계산)" if njob > 1 else ""))
+        for kjob, why in (st.get("skipped") or {}).items():
+            log(f"    건너뜀 {kjob}: {why}")
+    if not st.get("completed") and "run" in stages:
+        with _RUN_LOCK:
+            _RUN_STATE["fail_shown"] += 1
+            show = _RUN_STATE["fail_shown"] <= 3      # 같은 원인이 반복되므로 처음 3개만 자세히
+        if show:
+            log(f"    실행 명령: {st.get('command', '-')}")
+            for l in st.get("launch_notes", []):
+                log(f"    {l}")
+            for l in st.get("runlog", []):
+                log(f"    runlog| {l}")
+            if not st.get("started", True):
+                log("    -> Abaqus 가 Job 파일(.dat/.sta)을 하나도 만들지 못했습니다. 위 runlog 줄이 원인입니다 "
+                    "(라이선스 서버 연결, abaqus 명령 옵션).")
+    elif st.get("launch_notes"):
+        log(f"    참고: 첫 명령이 거부되어 옵션을 줄여 실행함 -> {st.get('command')}")
+
+
+def _run_task(kind, tag, *args):
+    """작업 스레드에서 Abaqus/CalculiX 1 건 실행 (+ 추출) 후 바로 로그와 진행 상황을 남긴다."""
+    stages = args[-2]
+    with _RUN_LOCK:
+        _RUN_STATE["running"] += 1
+    progress(tag, run="Abaqus 실행 중" if "run" in stages else "ODB 추출 중")
+    log(f"[{tag}] 해석 시작 ({'통합 Job' if kind == 'combined' else args[3]['job']})")
+    try:
+        job, st = stage_run_combined(*args) if kind == "combined" else stage_run_one(*args)
+    except Exception as e:
+        log(f"[{tag}] 해석 단계 오류: {type(e).__name__}: {e}")
+        progress(tag, run=f"오류: {type(e).__name__}")
+        return None, {"completed": False, "errors": [str(e)]}
+    finally:
+        with _RUN_LOCK:
+            _RUN_STATE["running"] -= 1
+            _RUN_STATE["done"] += 1
+    _log_job_result(job, st, stages)
+    if "n_cases" in st:
+        progress(tag, run=f"끝: 케이스 {st['n_cases_done']}/{st['n_cases']} 완료"
+                 + (f", 건너뜀 {len(st.get('skipped') or {})}" if st.get("skipped") else ""))
+    else:
+        progress(tag, run=f"끝: {job.replace(tag + '_', '')} completed={st.get('completed')}")
+    return job, st
+
+
+def submit_runs(ex, cfg, solver, work, info, stages, force) -> list:
+    run_dir = work / info["tag"] / "run"
+    tag = info["tag"]
+    calls = ([("combined", (cfg, run_dir, info, stages, force))] if info.get("combined") else
+             [("one", (cfg, solver, run_dir, j, info["rp_id"], stages, force)) for j in info["jobs"]])
+    with _RUN_LOCK:
+        waiting = _RUN_STATE["queued"] - _RUN_STATE["done"] - _RUN_STATE["running"]
+        busy = _RUN_STATE["running"] >= getattr(ex, "_max_workers", 1)
+        _RUN_STATE["queued"] += len(calls)
+    # 진행 상황/로그를 먼저 쓰고 넣는다 (작업 스레드가 바로 시작하면 '실행 중' 을 덮어쓰지 않게)
+    progress(tag, run="해석 대기 (앞 해석이 끝나면 시작)" if busy or waiting > 0 else "해석 시작 준비")
+    log(f"[{tag}] 해석을 대기열에 넣음 -> Abaqus 가 비는 대로 시작 (다음 모델 메시와 동시에 진행)")
+    return [ex.submit(_run_task, kind, tag, *args) for kind, args in calls]
+
+
 def _win(p: str) -> str:
     import os
     return os.path.normpath(p) if os.name == "nt" else p
@@ -744,9 +984,11 @@ def main():
     dialect = "abaqus" if solver == "abaqus" else "ccx"
     work = resolve(cfg, cfg.get("work_dir", "auto_out"))
     work.mkdir(parents=True, exist_ok=True)
-    global LOG_FILE
+    global LOG_FILE, PROGRESS_FILE
     LOG_FILE = work / "pipeline_log.txt"
+    PROGRESS_FILE = work / "progress.txt"
     log(f"===== run_pipeline {a.config}  stage={a.stage}  only={a.only} =====")
+    check_previous_run(work)
     check_hex_auto(cfg)
     check_models(cfg)
     resolve_programs(cfg, solver, stages)
@@ -778,126 +1020,127 @@ def main():
 
     only = {safe_name(s) for s in a.only.split(",") if s.strip()}
     model_infos = []
+    todo = []
     for m in model_list(cfg):
         if only and m["name"] not in only:
             continue
         mname = m.get("material", cfg.get("default_material", next(iter(mats))))
         if mname not in mats:
             raise ValueError(f"모델 {m['name']}: 물성 '{mname}' 이 materials 에 없습니다.")
-        mat = mats[mname]
         for es in cfg["mesh"].get("elem_sizes", [2.0]):
             tag = f"{m['name']}_E{inp_writer.fmt_num(float(es))}"
-            tag_dir = work / tag
-            try:
-                if "mesh" in stages:
-                    log(f"[{tag}] mesh ...")
-                    st = stage_mesh(cfg, m, float(es), tag_dir, a.force)
-                    cnt = (f"hex={st.get('N_HEX')}" if st.get('N_HEX') not in (None, '')
-                           else f"tet={st.get('N_TET', '-')} badTria={st.get('BAD_TRIA', '-')}")
-                    log(f"[{tag}] mesh {st.get('STATUS')} {st.get('MESSAGE', '')} {cnt}")
-                    if st.get("FIRST_TRY"):
-                        log(f"[{tag}] 1차(YL_V4) 실패 -> HyperMesh 를 새로 띄워 2차(단순 메시) 자동 재시도함. "
-                            f"1차 원인: {st.get('FIRST_TRY')}")
-                        for l in st.get("LOG_TAIL_TRY1", [])[-8:]:
-                            log(f"[{tag}]   1차| {l}")
-                    if st.get("AREA_API", None) == "" and st.get("ALGO") != "GMSH_FALLBACK":
-                        log(f"[{tag}] 주의: HyperMesh 에서 면적 함수를 못 써서 작은 면 자동 무시(defeature)가 "
-                            f"제대로 안 됐을 수 있습니다 (hm_log.txt 의 'defeature' 줄 확인)")
-                    if str(st.get("ALGO", "")).startswith("YL_V10"):
-                        log(f"[{tag}] YL_V10 엔진={st.get('ENGINE')} ({st.get('MESHER')}) 2D 합격={st.get('PASS2D')} "
-                            f"스킨 Tria={st.get('N_TRIA')} q평균={st.get('Q_MEAN')} | Tetra={st.get('N_TET')} "
-                            f"aspect p95={st.get('TET_ASP_P95')} collapse<0.15={st.get('TET_COL_LT015')}% "
-                            f"성장률={st.get('TET_GROWTH')}")
-                        if st.get("ENGINE") == "V9>V8":
-                            log(f"[{tag}] 주의: BatchMesher(V9) 스킨이 합격하지 못해 V8 엔진으로 다시 메시했습니다")
-                    if st.get("ALGO") == "FALLBACK_SIMPLE":
-                        log(f"[{tag}] 주의: YL_V4 메시 알고리즘이 실패해 단순 메시(전체 면 Tria -> Tetra)로 대신 만들었습니다. "
-                            f"원인: {st.get('V4_ERROR') or 'V4 단계에서 Tetra 0개'}")
-                    if st.get("STATUS") != "OK":
-                        for l in st.get("LOG_TAIL", []):
-                            log(f"[{tag}]   | {l}")
-                        hint = (("헥사 전용 모드: YL_HEX 와 자동 헥사가 모두 실패했습니다. mesh 폴더의 gridhex_console.log 와 "
-                                 "*_hexmesh.png 를 보내 주세요."
-                                 if cfg.get("hypermesh", {}).get("hex_auto", True) else
-                                 "헥사 전용 모드: SolidMap 이 이 형상을 매핑하지 못했고, 자동 헥사가 꺼져 있어(hypermesh.hex_auto = "
-                                 "false) 시도하지 않았습니다. config_abaqus.json 의 hypermesh.hex_auto 를 true 로 바꾸고 다시 실행하세요.")
-                                if mesh_engine(cfg) == "hex" else
-                                "급하면 HyperMesh GUI 에서 직접 메시한 .inp 를 models 폴더에 넣으면 메시 단계를 건너뜁니다.")
-                        log(f"[{tag}] 메시 실패 -> 이 모델은 해석(ODB) 단계로 가지 않습니다. {hint}")
-                        continue
-                info_file = tag_dir / "model_info.json"
-                if "build" in stages or not info_file.exists():
-                    info = stage_build(cfg, m, float(es), tag, tag_dir, mat, dialect)
-                    log(f"[{tag}] build OK: {info['element_type']} n_elem={info['quality']['n_elem']} "
-                        f"INNER={info['sets']['inner_nodes']} OUTER={info['sets']['outer_nodes']} "
-                        f"jobs={len(info['jobs'])}"
-                        + (f" -> 통합 Job 1개 ({info['combined']['job']}.odb)" if info.get("combined") else "")
-                        + (" | INP 검사 OK (Abaqus/HyperMesh 형식)" if (info.get("inp_check") or {}).get("hm_ok") else ""))
-                    rq = info.get("quality_repair") or {}
-                    if rq:
-                        log(f"[{tag}] 메시 품질 보정: 품질<0.02 요소 {rq['n_below_0p02_before']} -> {rq['n_below_0p02_after']}개, "
-                            f"<0.1 요소 {rq['n_below_0p1_before']} -> {rq['n_below_0p1_after']}개, 최소 품질 "
-                            f"{rq['q_min_before']:.4f} -> {rq['q_min_after']:.4f} "
-                            f"(절점 {rq['nodes_moved']}개 이동, 표면 껍질 요소 {rq.get('surface_slivers_deleted', 0)}개 삭제)")
-                        if rq["n_below_0p02_after"] > 0:
-                            log(f"[{tag}] WARNING 품질<0.02 요소가 {rq['n_below_0p02_after']}개 남았습니다 -> 큰 스웨징에서 발산할 수 있음. "
-                                f"(HyperMesh 메시라면 config 의 mesh.mesher 를 'gmsh' 로 바꿔 비교해 볼 것)")
-                    if info["sets"].get("method"):
-                        tb = [round(v, 3) for v in info["axis"].get("translated_by", [0, 0, 0])]
-                        log(f"[{tag}] 형상 판별: 축={info['axis']['source_axis']} -> +Y, 원점 이동 {tb} mm, "
-                            f"INNER {'원형' if info['sets']['inner_is_round'] else '비원형'} / "
-                            f"OUTER {'원형' if info['sets']['outer_is_round'] else '비원형'}, "
-                            f"스웨징 방향={info['sets']['swage_direction']}")
-                    for w in info["sets"].get("warnings", []):
-                        log(f"[{tag}] WARNING {w}")
-                else:
-                    info = json.loads(info_file.read_text(encoding="utf-8"))
-                model_infos.append(info)
-            except Exception as e:
-                log(f"[{tag}] ERROR {e}")
-                (tag_dir).mkdir(parents=True, exist_ok=True)
-                (tag_dir / "error.txt").write_text(traceback.format_exc(), encoding="utf-8")
-
-    if {"run", "extract"} & set(stages):
-        npar = int(cfg.get(solver, {}).get("max_parallel", 1))
-        tasks = []
-        n_fail_shown = 0
-        with ThreadPoolExecutor(max_workers=npar) as ex:
-            for info in model_infos:
-                run_dir = work / info["tag"] / "run"
-                if info.get("combined"):
-                    tasks.append(ex.submit(stage_run_combined, cfg, run_dir, info, stages, a.force))
+            todo.append((m, mats[mname], es, tag, work / tag))
+            progress(tag, mesh="대기", run="-")
+    # [v27.5] 메시가 이미 있는 모델을 먼저 -> 그 모델들의 해석이 바로 시작됨 (메시가 오래 걸리는 모델은 뒤로)
+    ready = [t for t in todo if mesh_ready(cfg, t[0], t[4])] if "mesh" in stages and not a.force else []
+    if ready and len(ready) < len(todo):
+        todo = ready + [t for t in todo if t not in ready]
+        log(f"메시가 이미 있는 모델 {len(ready)}개를 먼저 처리합니다 -> 해석이 바로 시작됨 "
+            f"(나머지 {len(todo) - len(ready)}개는 메시를 만들면서 차례로 해석에 넣음)")
+    do_runs = bool({"run", "extract"} & set(stages))
+    runner = ThreadPoolExecutor(max_workers=max(1, int(cfg.get(solver, {}).get("max_parallel", 1)))) if do_runs else None
+    run_futs = []
+    for m, mat, es, tag, tag_dir in todo:
+        try:
+            if "mesh" in stages:
+                log(f"[{tag}] mesh ...")
+                progress(tag, mesh="메시 중")
+                st = stage_mesh(cfg, m, float(es), tag_dir, a.force)
+                cnt = (f"hex={st.get('N_HEX')}" if st.get('N_HEX') not in (None, '')
+                       else f"tet={st.get('N_TET', '-')} badTria={st.get('BAD_TRIA', '-')}")
+                log(f"[{tag}] mesh {st.get('STATUS')} {st.get('MESSAGE', '')} {cnt}")
+                if st.get("FIRST_TRY"):
+                    log(f"[{tag}] 1차(YL_V4) 실패 -> HyperMesh 를 새로 띄워 2차(단순 메시) 자동 재시도함. "
+                        f"1차 원인: {st.get('FIRST_TRY')}")
+                    for l in st.get("LOG_TAIL_TRY1", [])[-8:]:
+                        log(f"[{tag}]   1차| {l}")
+                if st.get("AREA_API", None) == "" and st.get("ALGO") != "GMSH_FALLBACK":
+                    log(f"[{tag}] 주의: HyperMesh 에서 면적 함수를 못 써서 작은 면 자동 무시(defeature)가 "
+                        f"제대로 안 됐을 수 있습니다 (hm_log.txt 의 'defeature' 줄 확인)")
+                if str(st.get("ALGO", "")).startswith("YL_V10"):
+                    log(f"[{tag}] YL_V10 엔진={st.get('ENGINE')} ({st.get('MESHER')}) 2D 합격={st.get('PASS2D')} "
+                        f"스킨 Tria={st.get('N_TRIA')} q평균={st.get('Q_MEAN')} | Tetra={st.get('N_TET')} "
+                        f"aspect p95={st.get('TET_ASP_P95')} collapse<0.15={st.get('TET_COL_LT015')}% "
+                        f"성장률={st.get('TET_GROWTH')}")
+                    if st.get("ENGINE") == "V9>V8":
+                        log(f"[{tag}] 주의: BatchMesher(V9) 스킨이 합격하지 못해 V8 엔진으로 다시 메시했습니다")
+                if st.get("ALGO") == "FALLBACK_SIMPLE":
+                    log(f"[{tag}] 주의: YL_V4 메시 알고리즘이 실패해 단순 메시(전체 면 Tria -> Tetra)로 대신 만들었습니다. "
+                        f"원인: {st.get('V4_ERROR') or 'V4 단계에서 Tetra 0개'}")
+                if st.get("STATUS") != "OK":
+                    for l in st.get("LOG_TAIL", []):
+                        log(f"[{tag}]   | {l}")
+                    hint = (("헥사 전용 모드: YL_HEX 와 자동 헥사가 모두 실패했습니다. mesh 폴더의 gridhex_console.log 와 "
+                             "*_hexmesh.png 를 보내 주세요."
+                             if cfg.get("hypermesh", {}).get("hex_auto", True) else
+                             "헥사 전용 모드: SolidMap 이 이 형상을 매핑하지 못했고, 자동 헥사가 꺼져 있어(hypermesh.hex_auto = "
+                             "false) 시도하지 않았습니다. config_abaqus.json 의 hypermesh.hex_auto 를 true 로 바꾸고 다시 실행하세요.")
+                            if mesh_engine(cfg) == "hex" else
+                            "급하면 HyperMesh GUI 에서 직접 메시한 .inp 를 models 폴더에 넣으면 메시 단계를 건너뜁니다.")
+                    log(f"[{tag}] 메시 실패 -> 이 모델은 해석(ODB) 단계로 가지 않습니다. {hint}")
+                    progress(tag, mesh="실패" + (" (지난번과 같음)" if st.get("SKIPPED_SAME") else ""),
+                             run="안 함 (메시 실패)")
                     continue
-                for j in info["jobs"]:
-                    tasks.append(ex.submit(stage_run_one, cfg, solver, run_dir, j, info["rp_id"], stages, a.force))
-            for fut in as_completed(tasks):
-                job, st = fut.result()
-                log(f"  {job}: completed={st.get('completed')} inc={st.get('n_increments')} "
-                    f"t={st.get('elapsed_s')}s extracted={st.get('extracted', '-')} {st.get('errors') or ''}")
-                if "n_cases" in st:
-                    njob = len(st.get("chain") or [1])
-                    log(f"    통합 Job: 하중 케이스 {st['n_cases_done']}/{st['n_cases']} 개 완료"
-                        + (f" (발산한 케이스를 건너뛰며 Job {njob}개로 나눠 계산)" if njob > 1 else ""))
-                    for kjob, why in (st.get("skipped") or {}).items():
-                        log(f"    건너뜀 {kjob}: {why}")
-                if not st.get("completed") and "run" in stages:
-                    n_fail_shown += 1
-                    if n_fail_shown <= 3:   # 같은 원인이 반복되므로 처음 3개만 자세히
-                        log(f"    실행 명령: {st.get('command', '-')}")
-                        for l in st.get("launch_notes", []):
-                            log(f"    {l}")
-                        for l in st.get("runlog", []):
-                            log(f"    runlog| {l}")
-                        if not st.get("started", True):
-                            log("    -> Abaqus 가 Job 파일(.dat/.sta)을 하나도 만들지 못했습니다. 위 runlog 줄이 원인입니다 "
-                                "(라이선스 서버 연결, abaqus 명령 옵션).")
-                elif st.get("launch_notes"):
-                    log(f"    참고: 첫 명령이 거부되어 옵션을 줄여 실행함 -> {st.get('command')}")
+                lab = ", ".join(x for x in (str(st.get("ALGO") or ""), f"헥사 {st['N_HEX']}" if st.get("N_HEX") else "") if x)
+                progress(tag, mesh=f"OK ({lab})" if lab else "OK")
+            else:
+                progress(tag, mesh="(이전 메시 사용)")
+            info_file = tag_dir / "model_info.json"
+            if "build" in stages or not info_file.exists():
+                info = stage_build(cfg, m, float(es), tag, tag_dir, mat, dialect)
+                log(f"[{tag}] build OK: {info['element_type']} n_elem={info['quality']['n_elem']} "
+                    f"INNER={info['sets']['inner_nodes']} OUTER={info['sets']['outer_nodes']} "
+                    f"jobs={len(info['jobs'])}"
+                    + (f" -> 통합 Job 1개 ({info['combined']['job']}.odb)" if info.get("combined") else "")
+                    + (" | INP 검사 OK (Abaqus/HyperMesh 형식)" if (info.get("inp_check") or {}).get("hm_ok") else ""))
+                rq = info.get("quality_repair") or {}
+                if rq:
+                    log(f"[{tag}] 메시 품질 보정: 품질<0.02 요소 {rq['n_below_0p02_before']} -> {rq['n_below_0p02_after']}개, "
+                        f"<0.1 요소 {rq['n_below_0p1_before']} -> {rq['n_below_0p1_after']}개, 최소 품질 "
+                        f"{rq['q_min_before']:.4f} -> {rq['q_min_after']:.4f} "
+                        f"(절점 {rq['nodes_moved']}개 이동, 표면 껍질 요소 {rq.get('surface_slivers_deleted', 0)}개 삭제)")
+                    if rq["n_below_0p02_after"] > 0:
+                        log(f"[{tag}] WARNING 품질<0.02 요소가 {rq['n_below_0p02_after']}개 남았습니다 -> 큰 스웨징에서 발산할 수 있음. "
+                            f"(HyperMesh 메시라면 config 의 mesh.mesher 를 'gmsh' 로 바꿔 비교해 볼 것)")
+                if info["sets"].get("method"):
+                    tb = [round(v, 3) for v in info["axis"].get("translated_by", [0, 0, 0])]
+                    log(f"[{tag}] 형상 판별: 축={info['axis']['source_axis']} -> +Y, 원점 이동 {tb} mm, "
+                        f"INNER {'원형' if info['sets']['inner_is_round'] else '비원형'} / "
+                        f"OUTER {'원형' if info['sets']['outer_is_round'] else '비원형'}, "
+                        f"스웨징 방향={info['sets']['swage_direction']}")
+                for w in info["sets"].get("warnings", []):
+                    log(f"[{tag}] WARNING {w}")
+            else:
+                info = json.loads(info_file.read_text(encoding="utf-8"))
+            model_infos.append(info)
+            if runner is not None:      # [v27.5] 이 모델 해석을 바로 시작 (다음 모델 메시와 동시에)
+                run_futs += submit_runs(runner, cfg, solver, work, info, stages, a.force)
+            else:
+                progress(tag, run="이번 실행은 해석 단계 없음 (--stage)")
+        except Exception as e:
+            log(f"[{tag}] ERROR {e}")
+            progress(tag, run=f"안 함 (오류: {str(e)[:40]})")
+            (tag_dir).mkdir(parents=True, exist_ok=True)
+            (tag_dir / "error.txt").write_text(traceback.format_exc(), encoding="utf-8")
+
+    if runner is not None:
+        with _RUN_LOCK:
+            left = _RUN_STATE["queued"] - _RUN_STATE["done"]
+        if left:
+            log(f"메시/INP 단계 끝. 남은 해석 {left}건이 끝날 때까지 기다립니다 "
+                f"(이 창을 닫으면 돌던 Abaqus 도 같이 꺼집니다. 진행 상황: {PROGRESS_FILE})")
+        runner.shutdown(wait=True)
 
     if "report" in stages and model_infos:
         rows = stage_report(cfg, work, model_infos)
         n_ok = sum(r["status"] == "OK" for r in rows)
         log(f"report: {n_ok}/{len(rows)} jobs OK -> {work / 'qc_report.md'}, {work / 'dataset'}")
+    # [v27.5] 모델별 최종 상태 한눈에
+    log("===== 모델별 결과 =====")
+    for t, v in PROGRESS.items():
+        log(f"  {t}: 메시 {v.get('mesh')} | 해석 {v.get('run')}")
+    progress_end(f"모델 {len(PROGRESS)}개, 해석한 모델 {len(model_infos)}개")
+    mark_run_finished(work)
 
 
 if __name__ == "__main__":

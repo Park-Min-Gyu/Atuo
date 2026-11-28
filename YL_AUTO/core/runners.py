@@ -240,6 +240,9 @@ def run_grid_hex(g_cfg: dict, geom: Path, out_dir: Path, base: str, elem_size: f
         status_file.write_text("".join(f"{k}={v}\n" for k, v in st.items()), encoding="utf-8")
     else:
         st["LOG_TAIL"] = _tail(log_file, 8)
+        # [v27.5] 자동 헥사가 끝까지 돌고 품질 기준에서 떨어진 실패 (같은 입력이면 다시 해도 같은 결과).
+        #         시간 초과나 중간에 죽은 경우는 PC 사정일 수 있으므로 해당 안 됨
+        st["DETERMINISTIC_FAIL"] = bool(res) and rc != "timeout"
     return st
 
 
