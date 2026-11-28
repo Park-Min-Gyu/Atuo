@@ -85,6 +85,22 @@ catch { *quit 1 }
 '''
 
 
+def park_geometry_hm(out_dir: Path, base: str) -> str:
+    """[v27.6] SolidMap 이 헥사를 못 만들었을 때 HyperMesh 가 저장한 <base>.hm 에는 CAD 형상만 있고 메시가 없다.
+    이 파일을 메시 파일로 오해하지 않게 이름을 <base>_SolidMap_geometry_only.hm 으로 바꾼다. 반환: 새 경로(없으면 "")"""
+    src = Path(out_dir) / f"{base}.hm"
+    if not src.exists():
+        return ""
+    dst = Path(out_dir) / f"{base}_SolidMap_geometry_only.hm"
+    try:
+        if dst.exists():
+            dst.unlink()
+        src.rename(dst)
+        return runners._p(dst)
+    except OSError:          # HyperMesh 에서 열려 있으면 이름을 못 바꿈 -> 그대로 둠
+        return runners._p(src)
+
+
 def run_hex(hm_cfg: dict, script: Path, geom: Path, out_dir: Path, base: str, elem_size: float,
             elem_type: str = "C3D8H") -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -129,11 +145,13 @@ def run_hex(hm_cfg: dict, script: Path, geom: Path, out_dir: Path, base: str, el
     out_inp = out_dir / f"{base}_hm.inp"
     if ok:
         Path(out_inp).write_bytes(Path(inp).read_bytes())
+    geom_hm = "" if ok else park_geometry_hm(out_dir, base)
     msg = "" if ok else "YL_HEX : " + "; ".join(why)
     st = {"STATUS": "OK" if ok else "FAIL", "MESSAGE": msg, "ALGO": "YL_HEX_V6", "HEX_STATUS": r.get("STATUS", ""),
           "N_HEX": n_hex, "N_PENTA": n_penta, "N_SOLIDS": r.get("N_SOLIDS", ""), "N_UNMAP": n_unmap,
           "N_TET": n_hex, "N_TRIA": 0, "ELEM_SIZE": 2.0, "ELEM_SIZE_ASKED": elem_size,
-          "INP_FILE": runners._p(out_inp) if ok else "", "returncode": rc, "elapsed_s": round(dt, 1)}
+          "INP_FILE": runners._p(out_inp) if ok else "", "returncode": rc, "elapsed_s": round(dt, 1),
+          "GEOM_ONLY_HM": geom_hm}
     (out_dir / "hm_status.txt").write_text("".join(f"{k}={v}\n" for k, v in st.items()), encoding="utf-8")
     st["LOG_TAIL"] = [f"hex: {r.get('MESSAGE', '')[:400]}"] if r else runners._tail(log_dir / "hm_console_HEX.log", 10)
     return st

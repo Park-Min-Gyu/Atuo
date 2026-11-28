@@ -312,6 +312,10 @@ def _stage_mesh(cfg, m, es, tag_dir, force):
             log(f"[{m['name']}] 헥사 메시 성공 (자동 헥사) : Hex {gs.get('N_HEX')}개, 최소 scaled Jacobian {gs.get('SJ_MIN')}"
                 f" (평균 {gs.get('SJ_MEAN')}), CAD 대비 부피 오차 {gs.get('VOLUME_ERR_PCT')} %, {gs.get('elapsed_s')}s"
                 f" -> 메시 그림 mesh/{m['name']}_hexmesh.png")
+            log(f"[{m['name']}] HyperMesh 로 헥사 메시 보기: File > Import > Solver Deck (File type = Abaqus) 에서 "
+                f"mesh/{m['name']}_hm.inp 또는 run 폴더의 *_mesh.inp 를 읽음"
+                + (" (mesh/*_SolidMap_geometry_only.hm 은 SolidMap 시도 때 저장한 CAD 형상뿐, 메시 없음)"
+                   if (hs or {}).get("GEOM_ONLY_HM") else ""))
             if memo_f.exists():
                 memo_f.unlink()
             return gs
