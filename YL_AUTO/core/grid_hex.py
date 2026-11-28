@@ -67,8 +67,25 @@ _SJ_NB = [(1, 3, 4), (2, 0, 5), (3, 1, 6), (0, 2, 7), (7, 5, 0), (4, 6, 1), (5, 
 HEX_EDGES = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
 
 
+def _gauss_dN():
+    """C3D8 2x2x2 적분점에서 형상함수 미분 (적분점 8, 절점 8, 3)"""
+    xi = np.array([(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1),
+                   (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)], float)
+    out = np.zeros((8, 8, 3))
+    for g, p in enumerate(xi / np.sqrt(3.0)):
+        for a, (sx, sy, sz) in enumerate(xi):
+            out[g, a] = (sx * (1 + sy * p[1]) * (1 + sz * p[2]) / 8, sy * (1 + sx * p[0]) * (1 + sz * p[2]) / 8,
+                         sz * (1 + sx * p[0]) * (1 + sy * p[1]) / 8)
+    return out
+
+
+_GDN = _gauss_dN()
+
+
 def hex_sj_coords(P):
-    """P (n,8,3) 꼭짓점 좌표 -> 요소별 최소 scaled Jacobian (8 꼭짓점). 정육면체 1, 0 이하 = 뒤집힘"""
+    """P (n,8,3) 꼭짓점 좌표 -> 요소별 최소 scaled Jacobian. 정육면체 1, 0 이하 = 뒤집힘.
+    [v27.2] 8 꼭짓점에 더해 Abaqus 가 실제로 검사하는 8 적분점(2x2x2)의 Jacobian 도 본다
+    (꼭짓점은 멀쩡해도 심하게 비틀린 요소는 안쪽 적분점에서 음수가 될 수 있음)."""
     out = np.full(len(P), np.inf)
     for k, (a, b, d) in enumerate(_SJ_NB):
         p = P[:, k]
@@ -76,7 +93,11 @@ def hex_sj_coords(P):
         det = np.einsum("ij,ij->i", e1, np.cross(e2, e3))
         nrm = np.linalg.norm(e1, axis=1) * np.linalg.norm(e2, axis=1) * np.linalg.norm(e3, axis=1)
         out = np.minimum(out, det / np.maximum(nrm, 1e-300))
-    return out
+    J = np.einsum("gak,naj->ngkj", _GDN, P)               # (n, 8, 3, 3) : 행 = d/dxi_k
+    r0, r1, r2 = J[:, :, 0, :], J[:, :, 1, :], J[:, :, 2, :]
+    det = np.einsum("ngj,ngj->ng", r0, np.cross(r1, r2))
+    nrm = np.linalg.norm(r0, axis=2) * np.linalg.norm(r1, axis=2) * np.linalg.norm(r2, axis=2)
+    return np.minimum(out, (det / np.maximum(nrm, 1e-300)).min(axis=1))
 
 
 def hex_sj(x, c):
@@ -1449,6 +1470,13 @@ class Boundary:
         Y[s] = self.cpos[s]
         return Y
 
+    def relax(self, nodes):
+        """이 절점들의 모서리선/꼭짓점 구속을 풀고 면 절점(첫째 패치 위에서 미끄러짐)으로"""
+        nodes = np.asarray(nodes, np.int64)
+        m = (self.cls[nodes] == 1) | (self.cls[nodes] == 2)
+        self.cls[nodes[m]] = 0
+        return int(m.sum())
+
     def project_points(self, P, nodes):
         """면(cls 0) 절점 후보 위치를 그 절점의 패치 위로"""
         y, _, _ = self.SQ.closest(P, k=12, patch=self.l1[nodes])
@@ -1682,7 +1710,7 @@ def _batches(nodes, ptr, ne):
     return out
 
 
-def _improve_batch(X, conn, nodes, ptr, ne, h, bnd, surf, Lap=None, deg=None):
+def _improve_batch(X, conn, nodes, ptr, ne, h, bnd, surf, Lap=None, deg=None, offs=None, dmax=0.0):
     """같은 요소를 공유하지 않는 절점 묶음을 한꺼번에 국부 최적화 (단조 개선 : 좋아질 때만 이동)"""
     cnt = ptr[nodes + 1] - ptr[nodes]
     inc_node = np.repeat(np.arange(len(nodes)), cnt)
@@ -1691,7 +1719,8 @@ def _improve_batch(X, conn, nodes, ptr, ne, h, bnd, surf, Lap=None, deg=None):
     slot = np.argmax(cc == nodes[inc_node][:, None], axis=1)
     Pe = X[cc]
     rows = np.arange(len(inc_elem))
-    is_s = surf[nodes]
+    is_o = offs[nodes] if offs is not None else np.zeros(len(nodes), bool)
+    is_s = surf[nodes] & ~is_o
     # 절점마다 주변 모서리 길이 (이동 폭 기준)
     Ln = np.zeros(len(nodes))
     for k in range(8):
@@ -1707,11 +1736,18 @@ def _improve_batch(X, conn, nodes, ptr, ne, h, bnd, surf, Lap=None, deg=None):
         mn = np.full(len(nodes), np.inf)
         np.minimum.at(mn, inc_node, v)
         tot = np.bincount(inc_node, weights=np.minimum(v, 0.3) + 3.0 * np.minimum(v, 0.0), minlength=len(nodes))
-        return tot + mn
+        q = tot + mn
+        if is_o.any():
+            # 겉면에서 dmax 보다 멀어지는 후보는 버림 (형상 오차 제한)
+            _, d, _ = bnd.SQ.closest(Pc[is_o], k=12)
+            qo = q[is_o]
+            qo[d > dmax] = -np.inf
+            q[is_o] = qo
+        return q
 
     is_c = np.zeros(len(nodes), bool)
     if bnd is not None:
-        is_c = (bnd.cls[nodes] == 1) & ~is_s
+        is_c = (bnd.cls[nodes] == 1) & ~is_s & ~is_o
 
     def proj(Pc):
         if is_s.any() or is_c.any():
@@ -1755,7 +1791,7 @@ def _improve_batch(X, conn, nodes, ptr, ne, h, bnd, surf, Lap=None, deg=None):
     return X, float((bq - q0).sum())
 
 
-def optimize_bad(X, conn, free, bnd, h, thr=0.3, passes=5, log=None):
+def optimize_bad(X, conn, free, bnd, h, thr=0.3, passes=5, log=None, offs=None, dmax=0.0):
     """품질 나쁜 요소의 절점을 26 방향으로 조금씩 옮겨 보며 주변 요소의 최소 scaled Jacobian 을 올림.
     내부 절점은 자유롭게, 겉면(면) 절점은 겉면 위에서만. 같은 요소를 공유하지 않는 절점끼리 한꺼번에 계산."""
     ptr, ne = _node_elems(conn, len(X))
@@ -1772,12 +1808,15 @@ def optimize_bad(X, conn, free, bnd, h, thr=0.3, passes=5, log=None):
         if not len(bad):
             break
         nodes = np.unique(conn[bad])
-        nodes = nodes[free[nodes] | surf[nodes] | curve[nodes]]
+        mov = free[nodes] | surf[nodes] | curve[nodes]
+        if offs is not None:
+            mov |= offs[nodes]
+        nodes = nodes[mov]
         if not len(nodes):
             break
         gain = 0.0
         for b in _batches(nodes, ptr, ne):
-            X, g = _improve_batch(X, conn, b, ptr, ne, h, bnd, surf, Lap, deg)
+            X, g = _improve_batch(X, conn, b, ptr, ne, h, bnd, surf, Lap, deg, offs, dmax)
             gain += g
         if log:
             sj = hex_sj(X, conn)
@@ -1849,7 +1888,45 @@ def _fit(X, conn, quads, qn, SQ, CQ, corners, h, opts, log=None):
     X = untangle_global(X, conn, free, bnd, h, iters=400, log=log)
     X = optimize_bad(X, conn, free, bnd, h, thr=0.2, passes=int(opts.get("opt_passes", 4)), log=log)
     X = untangle_global(X, conn, free, bnd, h, iters=300, log=log)
+    X = _rescue(X, conn, free, bnd, h, log)
     return X, conn, quads, bnd
+
+
+def _rescue(X, conn, free, bnd, h, log=None, sj_ok=0.05):
+    """[v27.2] 그래도 뒤집히거나 납작한 요소가 남으면 (바깥 링-립처럼 모서리선이 좁게 꺾이는 곳)
+    1) 그 근처 절점의 모서리선/꼭짓점 구속을 풀어 면 위에서 자유롭게 미끄러지게 하고
+    2) 그래도 남으면 그 요소의 겉면 절점이 CAD 면에서 최대 0.15 h 까지 벗어나는 것을 허용해서 편다.
+    (모서리가 아주 조금 둥글어지는 대신 요소가 뒤집히지 않음)"""
+    ptr, ne = _node_elems(conn, len(X))
+    isB = ~free
+
+    def grow(nodes, k):
+        for _ in range(k):
+            nodes = np.unique(np.concatenate([conn[ne[ptr[n]:ptr[n + 1]]].ravel() for n in nodes]))
+        return nodes
+
+    for stage, (rings, dmax_f, passes) in enumerate([(1, 0.0, 4), (1, 0.08, 4), (2, 0.15, 4), (2, 0.25, 6),
+                                                       (3, 0.35, 6)], 1):
+        sj = hex_sj(X, conn)
+        bad = np.nonzero(sj <= sj_ok)[0]
+        if not len(bad):
+            break
+        ring = grow(np.unique(conn[bad]), rings)
+        if stage == 1:
+            n_rel = bnd.relax(ring)
+            X = optimize_bad(X, conn, free, bnd, h, thr=0.2, passes=passes)
+            if log:
+                log(f"   구제 1 (모서리선 구속 {n_rel}개 풀기): 0 이하 {int((hex_sj(X, conn) <= 0).sum())}개")
+        else:
+            bnd.relax(ring)
+            offs = np.zeros(len(X), bool)
+            offs[ring[isB[ring]]] = True
+            dmax = dmax_f * h
+            X = optimize_bad(X, conn, free, bnd, h, thr=0.2, passes=passes, offs=offs, dmax=dmax)
+            if log:
+                log(f"   구제 {stage} (겉면 절점 {int(offs.sum())}개, 면에서 최대 {dmax:.2f} mm 허용): "
+                    f"0 이하 {int((hex_sj(X, conn) <= 0).sum())}개")
+    return X
 
 
 def boundary_curvature(X, B, nrmB, bnd):
