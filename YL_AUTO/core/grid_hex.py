@@ -2083,7 +2083,9 @@ def _attempt_sweep(S, SQ, CQ, corners, ax, planes, h, att, opts, regions, walls=
 
 def write_inp(path, X, conn, etype="C3D8H", header=""):
     lines = [f"** {header}", "*NODE"]
-    lines += [f"{i}, {x:.6f}, {y:.6f}, {z:.6f}" for i, (x, y, z) in enumerate(X, 1)]
+    # [v27.4] 0 에 아주 가까운 값이 '-0.000000' 으로 나가지 않게 0 으로 (고정소수점이라 지수 표기는 원래 없음)
+    Xw = np.where(np.abs(X) < 5e-7, 0.0, X)
+    lines += [f"{i}, {x:.6f}, {y:.6f}, {z:.6f}" for i, (x, y, z) in enumerate(Xw, 1)]
     lines.append(f"*ELEMENT, TYPE={etype}, ELSET=RUBBER")
     lines += [f"{e}, " + ", ".join(str(int(v)) for v in c) for e, c in enumerate(conn + 1, 1)]
     Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")

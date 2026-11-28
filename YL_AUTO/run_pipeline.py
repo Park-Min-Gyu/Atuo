@@ -33,7 +33,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from core import findexe, inp_mesh, inp_writer, ogden, results, runners, shape_general, yl_hex, yl_v10  # noqa: E402
+from core import findexe, inp_check, inp_mesh, inp_writer, ogden, results, runners, shape_general, yl_hex, yl_v10  # noqa: E402
 
 STAGES = ["mesh", "build", "run", "extract", "report"]
 CAD_EXT = {".stp", ".step", ".igs", ".iges", ".x_t", ".x_b", ".catpart", ".prt", ".sat", ".hm"}
@@ -274,6 +274,75 @@ def _stage_mesh(cfg, m, es, tag_dir, force):
     return st
 
 
+def _snapshot_inputs(run_dir: Path, mesh_file: str, job_inps: list) -> dict:
+    """[v27.4] 다시 쓰기 전의 메시/Job INP 글과 지문 (숫자 표기만 바뀐 경우 이전 해석 결과를 계속 쓰기 위해)"""
+    snap = {"text": {}, "hash": {}}
+    for name in [mesh_file] + [f"{j}.inp" for j in job_inps]:
+        f = run_dir / name
+        if f.exists():
+            try:
+                snap["text"][name] = f.read_text(encoding="ascii", errors="ignore")
+            except OSError:
+                pass
+    for j in job_inps:
+        if (run_dir / f"{j}.inp").exists():
+            snap["hash"][j] = input_hash(run_dir / f"{j}.inp")
+    return snap
+
+
+def _keep_results_if_same(run_dir: Path, tag: str, mesh_file: str, job_inps: list, old: dict):
+    """[v27.4] 새 INP 가 예전 INP 와 숫자 표기(8e-06 -> 0.000008 등)만 다르면 해석 상태 파일의 지문을 새 INP 것으로 바꾼다.
+    -> 이미 끝난 해석을 다시 돌리지 않는다. 메시/세트/조건이 조금이라도 다르면 손대지 않음 (다시 해석)."""
+    names = [mesh_file] + [f"{j}.inp" for j in job_inps]
+    if not old["hash"] or any(n not in old["text"] for n in names):
+        return
+    try:
+        same = all(inp_check.equivalent(old["text"][n], (run_dir / n).read_text(encoding="ascii", errors="ignore"))
+                   for n in names)
+    except OSError:
+        return
+    if not same:
+        return
+    n_upd = 0
+    for j, h0 in old["hash"].items():
+        stf = run_dir / f"{j}_status.json"
+        if not stf.exists():
+            continue
+        try:
+            st = json.loads(stf.read_text(encoding="utf-8"))
+        except ValueError:
+            continue
+        h1 = input_hash(run_dir / f"{j}.inp")
+        if st.get("input_hash") == h0 and h1 != h0:
+            st["input_hash"] = h1
+            stf.write_text(json.dumps(st, indent=2, ensure_ascii=False), encoding="utf-8")
+            n_upd += 1
+    if n_upd:
+        log(f"[{tag}] INP 숫자 표기만 바뀜 (값은 같음) -> 이전 해석 결과를 그대로 씀")
+
+
+def _check_written_inputs(run_dir: Path, tag: str, job_inps: list) -> dict:
+    """[v27.4] 방금 쓴 Job INP(+ *Include 메시)를 검사. Abaqus 가 못 읽을 오류가 있으면 해석 전에 멈추고,
+    HyperMesh 만 못 읽는 표기(지수 표기 숫자)는 경고만 한다. 결과는 run/<tag>_inpcheck.txt"""
+    reps = []
+    for k, j in enumerate(job_inps):
+        reps.append(inp_check.check_inp(run_dir / f"{j}.inp", follow_include=(k == 0), refs=(k == 0)))
+    txt = "\n\n".join(inp_check.format_report(r) for r in reps[:3])
+    if len(reps) > 3:
+        txt += f"\n\n(Job INP {len(reps) - 3}개 더: 오류 {sum(r['n_errors'] for r in reps[3:])}개, "
+        txt += f"지수 표기 {sum(r['n_hm'] for r in reps[3:])}줄)"
+    (run_dir / f"{tag}_inpcheck.txt").write_text(txt + "\n", encoding="utf-8")
+    n_err, n_hm = sum(r["n_errors"] for r in reps), sum(r["n_hm"] for r in reps)
+    if n_err:
+        first = [f"{Path(f).name} 줄 {ln}: {msg}" for r in reps for f, ln, msg, _t, _k in r["errors"]][:5]
+        raise ValueError(f"INP 검사 실패 (오류 {n_err}개) -> 해석하지 않음: " + " / ".join(first)
+                         + f"  (자세히: run/{tag}_inpcheck.txt)")
+    if n_hm:
+        log(f"[{tag}] WARNING INP 에 HyperMesh 가 못 읽는 지수 표기 숫자 {n_hm}줄 (Abaqus 는 읽음) -> run/{tag}_inpcheck.txt")
+    return {"ok": True, "hm_ok": n_hm == 0, "n_errors": n_err, "n_hm": n_hm,
+            "n_nodes": reps[0]["n_nodes"], "n_elems": reps[0]["n_elems"], "n_steps": reps[0]["n_steps"]}
+
+
 def stage_build(cfg, m, es, tag, tag_dir, mat, dialect):
     gcfg = dict(cfg.get("geometry", {}))
     gcfg.update({k: v for k, v in m.items() if k in ("axis", "center", "inner_tol_mm", "outer_tol_mm",
@@ -325,8 +394,10 @@ def stage_build(cfg, m, es, tag, tag_dir, mat, dialect):
     run_dir = tag_dir / "run"
     run_dir.mkdir(parents=True, exist_ok=True)
     mesh_file = f"{tag}_mesh.inp"
-    winfo = inp_writer.write_mesh_inp(run_dir / mesh_file, mesh, sets, dialect, cfg.get("lab_aliases", True))
     jobs = jobs_for(cfg, tag)
+    job_inps = ([inp_writer.combined_job_name(tag)] if odb_mode(cfg, dialect) == "single" else [j["job"] for j in jobs])
+    old = _snapshot_inputs(run_dir, mesh_file, job_inps)
+    winfo = inp_writer.write_mesh_inp(run_dir / mesh_file, mesh, sets, dialect, cfg.get("lab_aliases", True))
     combined = None
     if odb_mode(cfg, dialect) == "single":
         # [v11] 모든 스웨징 x 방향을 Job/ODB 1개로
@@ -342,11 +413,13 @@ def stage_build(cfg, m, es, tag, tag_dir, mat, dialect):
                                  j["sign"], j["amp"], winfo["rp_id"], dialect, cfg.get("steps"),
                                  cfg.get("swaging_outward_positive", True), title=f"{m['name']} E{es}",
                                  inner_constraint=cfg.get("inner_constraint", "rigid_body"))
+    inp_rep = _check_written_inputs(run_dir, tag, job_inps)
+    _keep_results_if_same(run_dir, tag, mesh_file, job_inps, old)
     info = {"model": m["name"], "elem_size": es, "tag": tag, "source_inp": str(src), "dialect": dialect,
             "rp_id": winfo["rp_id"], "element_type": winfo["element_type"], "axis": ax_info,
             "sets": sets.info, "quality": q, "features": feats, "mesh_log": mesh.log, "components": comp, "quality_repair": repair,
             "material": {k: mat[k] for k in ("name", "mu", "alpha", "D", "mu0", "K0")}, "jobs": jobs,
-            "combined": combined}
+            "combined": combined, "inp_check": inp_rep}
     (tag_dir / "model_info.json").write_text(json.dumps(info, indent=2, ensure_ascii=False), encoding="utf-8")
     try:
         results.plot_sets(mesh, sets, tag_dir / f"{tag}_SETS.png", tag)
@@ -355,21 +428,8 @@ def stage_build(cfg, m, es, tag, tag_dir, mat, dialect):
     return info
 
 
-def input_hash(job_inp: Path) -> str:
-    """[v22] 해석 입력(Job INP + *Include 한 메시 INP)의 지문. 같으면 이전 해석 결과를 그대로 쓴다."""
-    h = hashlib.sha1()
-    try:
-        txt = job_inp.read_bytes()
-    except OSError:
-        return ""
-    h.update(txt)
-    m = re.search(rb"\*Include,\s*input=([^\r\n]+)", txt, re.I)
-    if m:
-        try:
-            h.update((job_inp.parent / m.group(1).decode(errors="ignore").strip().strip('"')).read_bytes())
-        except OSError:
-            pass
-    return h.hexdigest()[:16]
+# [v22] 해석 입력(Job INP + *Include 한 메시 INP)의 지문. 같으면 이전 해석 결과를 그대로 쓴다. (v27.4 : core.inp_check 로 옮김)
+input_hash = inp_check.input_hash
 
 
 def odb_mode(cfg, dialect) -> str:
@@ -771,7 +831,8 @@ def main():
                     log(f"[{tag}] build OK: {info['element_type']} n_elem={info['quality']['n_elem']} "
                         f"INNER={info['sets']['inner_nodes']} OUTER={info['sets']['outer_nodes']} "
                         f"jobs={len(info['jobs'])}"
-                        + (f" -> 통합 Job 1개 ({info['combined']['job']}.odb)" if info.get("combined") else ""))
+                        + (f" -> 통합 Job 1개 ({info['combined']['job']}.odb)" if info.get("combined") else "")
+                        + (" | INP 검사 OK (Abaqus/HyperMesh 형식)" if (info.get("inp_check") or {}).get("hm_ok") else ""))
                     rq = info.get("quality_repair") or {}
                     if rq:
                         log(f"[{tag}] 메시 품질 보정: 품질<0.02 요소 {rq['n_below_0p02_before']} -> {rq['n_below_0p02_after']}개, "

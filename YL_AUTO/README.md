@@ -1,3 +1,4 @@
+> v27.4 (2026-11-28): HyperMesh 'Fatal parsing error' 해결 - INP 숫자를 지수 표기(8e-06, 1e-08) 없이 고정소수점으로 씀, INP 자동 검사(`run/<모델>_inpcheck.txt`), 예전 INP 검사·고침 도구 `check_inp.py` - `수정내역_v27.md` 끝 참고
 > v27.3 (2026-11-28): 자동 헥사에 '오목 모서리 둥글게' 시도 추가 -> 바깥 링 + 끝 립 형상(Part2, Part6, MID_POR) 통과 - `수정내역_v27.md` 끝 참고
 > v27.2 (2026-11-28): 자동 헥사 품질 검사에 Abaqus 적분점(2x2x2) Jacobian 추가 + 뒤집힌 요소 구제 단계 - `수정내역_v27.md` 끝 참고
 > v27.1 (2026-11-28): 자동 헥사가 꺼진 채로 조용히 실패하지 않게 함 - v26 config 의 hex_auto=false 기본값이 남아 있으면 자동으로 켜고, 직접 꺼 둔 경우 시작할 때 [주의] 표시 - `수정내역_v27.md` 끝 참고
@@ -47,6 +48,7 @@ CAD(.stp 등) ──► HyperMesh 배치 (YL_HEX_V6_PURE_2mm.tcl = 연구실 헥
 | `config_abaqus_smoketest.json` | HyperMesh 없이 Abaqus·ODB 추출만 점검하는 4 Job 설정 |
 | `check_env.py`, `run_all.bat` | 환경 점검, 실행용 배치 파일 |
 | `collect_logs.py` | 실행 후 점검용 파일만 zip 으로 묶음 (ODB 제외, 이 파일만 보내면 됨) |
+| `check_inp.py` | INP 검사 (Abaqus/HyperMesh 가 읽을 수 있는지), HyperMesh 오류 줄 번호의 내용 보기, 예전 INP 의 지수 표기 숫자 고치기 (`--fix`) |
 | `hypermesh/YL_HEX/YL_HEX_V6_PURE_2mm.tcl` | 연구실 헥사 메시 원본 (**기본 메시 엔진**, HyperMesh 에서 단독 실행도 가능) |
 | `core/yl_hex.py` | 헥사 메시 실행 래퍼 (설정 창 없이 hmbatch 로 '헥사 + 3D' 실행, 결과 판정) |
 | `core/grid_hex.py` | 자동 헥사 (블록 분할 없이 순수 헥사 : 단면 사각형 메시를 축 방향으로 쌓고 경계층으로 CAD 에 맞춤) |
@@ -54,6 +56,7 @@ CAD(.stp 등) ──► HyperMesh 배치 (YL_HEX_V6_PURE_2mm.tcl = 연구실 헥
 | `core/inp_mesh.py` | INP 읽기, 요소 검사·보정, 축 정렬, INNER/OUTER 선택 |
 | `core/ogden.py` | Ogden N=3 피팅(시험데이터)과 Drucker 안정성 점검 |
 | `core/inp_writer.py` | 메시 전용 INP와 Job INP 작성 |
+| `core/inp_check.py` | INP 검사기 (숫자 형식, 번호 중복, 없는 절점/세트 참조) |
 | `core/runners.py` | hmbatch / Abaqus / CalculiX 실행, 완료 판정 |
 | `core/results.py` | 강성 계산, QC, 데이터셋, 그래프 |
 | `abaqus_scripts/extract_odb.py` | ODB → CSV (Abaqus Python, 2019 Py2.7 / 2024 Py3 공용) |

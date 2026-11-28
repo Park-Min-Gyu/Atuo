@@ -77,6 +77,22 @@ def main():
                 else:
                     z.write(p, arc)
                 n += 1
+        # [v27.4] INP 검사 요약 (HyperMesh 'Fatal parsing error' / Abaqus 입력 오류 원인을 바로 보기 위해)
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from core import inp_check
+            rep_lines = []
+            for job in sorted(work.glob("*/run/*.inp")):
+                head = job.read_bytes()[:4000]
+                if b"*Include" not in head and b"*INCLUDE" not in head:
+                    continue
+                if job.stem.endswith(tuple(f"_r{k}" for k in range(2, 30))):
+                    continue
+                rep_lines.append(inp_check.format_report(inp_check.check_inp(job), max_items=8))
+            z.writestr("inp_check_summary.txt", "\n\n".join(rep_lines) or "(run 폴더에 Job INP 없음)")
+            n += 1
+        except Exception as e:  # 요약은 부가 기능
+            z.writestr("inp_check_summary.txt", f"INP 검사 실패: {type(e).__name__}: {e}")
     print(f"[collect] {n} files -> {out}")
     return 0
 

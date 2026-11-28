@@ -119,7 +119,8 @@ def mesh(src: str, out: str, size: float, eps_mm: float = 0.05, stop_energy: flo
     with open(out, "w") as fh:
         fh.write("** robust_mesher (OpenCASCADE tessellation + TetWild)\n*NODE\n")
         for i, (x, y, z) in enumerate(X, 1):
-            fh.write(f"{i}, {x:.10g}, {y:.10g}, {z:.10g}\n")
+            # [v27.4] 지수 표기(1e-06 등)를 쓰지 않음 (HyperMesh 2019 가 못 읽음)
+            fh.write(f"{i}, {x + 0.0:.8f}, {y + 0.0:.8f}, {z + 0.0:.8f}\n")
         fh.write("*ELEMENT, TYPE=C3D4, ELSET=RUBBER\n")
         for k, (a, b, c, d) in enumerate(T, 1):
             fh.write(f"{k}, {a + 1}, {b + 1}, {c + 1}, {d + 1}\n")

@@ -7,6 +7,7 @@ inp_writer.py
 """
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -33,6 +34,49 @@ def job_name(tag: str, sw: float, direction: str, sign: int) -> str:
     return f"{tag}_SW{fmt_num(sw)}_{direction}{'P' if sign > 0 else 'M'}"
 
 
+# [v27.4] INP 에 쓰는 실수는 모두 이 함수로 쓴다.
+#   예전에는 Python 의 '.8g' 형식이라 0 에 아주 가까운 값이 '8e-06', '-2.3e-05', '1e-08' 같은 지수 표기로 나갔다.
+#   (가운데 면 근처 절점의 좌표, 축선 위 절점의 스웨징 변위, *Static 의 최소 증분)
+#   연구실 HyperMesh 2019 는 그런 줄마다 'Fatal parsing error on line ...' 을 내고 그 절점을 만들지 못했다.
+#   -> 항상 소수점이 있는 고정소수점으로 쓴다 (예: 19.  -22.986933  0.000008  0.00000001). '-0' 도 쓰지 않는다.
+COORD_DEC = 8      # 좌표 소수 자릿수 (mm 단위에서 0.01 um)
+DISP_DEC = 8       # 경계조건 변위 소수 자릿수
+
+
+def fnum(v, nd: int | None = None, sig: int = 10) -> str:
+    """고정소수점 실수 문자열 (지수 표기 없음, 끝의 0 은 지움, 소수점은 항상 남김).
+    nd  : 소수 자릿수. None 이면 유효숫자 sig 개가 남도록 정한다 (물성, 증분 같은 값).
+    nan / inf 는 INP 에 쓸 수 없으므로 ValueError."""
+    v = float(v)
+    if not math.isfinite(v):
+        raise ValueError(f"INP 에 쓸 수 없는 숫자 {v} (nan/inf)")
+    if nd is None:
+        if v == 0.0:
+            return "0."
+        nd = min(max(sig - 1 - math.floor(math.log10(abs(v))), 0), 40)
+    s = f"{v:.{nd}f}"
+    s = s.rstrip("0") if "." in s else s + "."
+    if s.startswith("-") and float(s) == 0.0:
+        s = "0."
+    return s
+
+
+def fnums(vals, nd: int | None = None, sig: int = 10) -> str:
+    return ", ".join(fnum(v, nd, sig) for v in vals)
+
+
+def _finite_or_raise(what: str, arr, ids=None):
+    """좌표/변위에 nan, inf 가 있으면 INP 를 쓰기 전에 멈춘다 (Abaqus/HyperMesh 가 읽지 못하는 파일을 만들지 않음)."""
+    a = np.asarray(arr, float)
+    bad = ~np.isfinite(a)
+    if a.ndim > 1:
+        bad = bad.any(axis=1)
+    if bad.any():
+        idx = np.nonzero(bad)[0][:5]
+        ex = [int(ids[i]) for i in idx] if ids is not None else idx.tolist()
+        raise ValueError(f"{what}: nan/inf 값 {int(bad.sum())}개 (예: 절점 {ex}) -> INP 를 쓰지 않음")
+
+
 def _write_ids(fh, ids, per_line=16):
     ids = list(map(int, ids))
     for i in range(0, len(ids), per_line):
@@ -43,13 +87,14 @@ def write_mesh_inp(path: Path, mesh, sets, dialect: str = "abaqus", lab_aliases:
     etype = ABQ_TYPE[dialect][mesh.family]
     rp_id = int(mesh.node_ids.max()) + 1
     eid = mesh.elem_ids
+    _finite_or_raise("절점 좌표", mesh.xyz, mesh.node_ids)
     with open(path, "w", encoding="ascii") as fh:
         fh.write("** YL_AUTO mesh-only file (no material / no step)\n")
         fh.write("** axis = +Y (radial plane = XZ), LOAD_RP = (0,0,0)\n")
         fh.write(f"** element family = {mesh.family} -> {etype}\n")
         fh.write("*Node\n")
         for nid, (x, y, z) in zip(mesh.node_ids, mesh.xyz):
-            fh.write(f"{int(nid)}, {x:.8g}, {y:.8g}, {z:.8g}\n")
+            fh.write(f"{int(nid)}, {fnum(x, COORD_DEC)}, {fnum(y, COORD_DEC)}, {fnum(z, COORD_DEC)}\n")
         fh.write("*Node, nset=LOAD_RP\n")
         fh.write(f"{rp_id}, 0., 0., 0.\n")
         fh.write(f"*Element, type={etype}, elset=RUBBER\n")
@@ -75,8 +120,8 @@ def _material_block(mat: dict, dialect: str) -> str:
         # CalculiX 는 D2/D3 = 0 을 '기본값 사용'으로 처리 -> Abaqus 와 같게(항 없음) 하려고 큰 값 사용
         D = [D[0]] + [v if v > 0 else 1e6 for v in D[1:]]
     s = f"*Material, name={mat['name']}\n*Hyperelastic, ogden, n=3\n"
-    s += ", ".join(f"{v:.10g}" for v in (mu[0], a[0], mu[1], a[1], mu[2], a[2], D[0], D[1])) + "\n"
-    s += f"{D[2]:.10g}\n"
+    s += fnums((mu[0], a[0], mu[1], a[1], mu[2], a[2], D[0], D[1])) + "\n"
+    s += f"{fnum(D[2])}\n"
     return s
 
 
@@ -96,20 +141,36 @@ def _ccx_controls(dialect, sc):
         return ""
     out = ""
     if cc.get("field"):
-        out += "*Controls, Parameters=field\n" + ", ".join(str(v) for v in cc["field"]) + "\n"
+        out += "*Controls, Parameters=field\n" + _ctrl_vals(cc["field"]) + "\n"
     if cc.get("time_incrementation"):
-        out += "*Controls, Parameters=time incrementation\n" + ", ".join(str(v) for v in cc["time_incrementation"]) + "\n"
+        out += "*Controls, Parameters=time incrementation\n" + _ctrl_vals(cc["time_incrementation"]) + "\n"
     return out
+
+
+def _ctrl_vals(vals) -> str:
+    """*Controls 데이터 : 정수는 정수로, 실수는 고정소수점으로 (빈 칸은 그대로)"""
+    out = []
+    for v in vals:
+        if v is None or v == "":
+            out.append("")
+        elif isinstance(v, int) and not isinstance(v, bool):
+            out.append(str(v))
+        else:
+            out.append(fnum(v))
+    return ", ".join(out)
 
 
 def _swage_dirs(mesh, sets):
     """OUTER 절점별 스웨징 방향(XZ 평면, 바깥쪽 +). 일반 형상은 법선 방향, 원형은 반경 방향."""
     d = getattr(sets, "outer_dir", None)
     if d is not None:
-        return d[:, 0], d[:, 1]
-    xo = mesh.xyz[sets.outer]
-    r = np.hypot(xo[:, 0], xo[:, 2])
-    return xo[:, 0] / r, xo[:, 2] / r
+        dx, dz = np.asarray(d[:, 0], float), np.asarray(d[:, 1], float)
+    else:
+        xo = mesh.xyz[sets.outer]
+        r = np.maximum(np.hypot(xo[:, 0], xo[:, 2]), 1e-12)
+        dx, dz = xo[:, 0] / r, xo[:, 2] / r
+    _finite_or_raise("스웨징 방향", np.c_[dx, dz], mesh.node_ids[sets.outer])
+    return dx, dz
 
 
 def write_job_inp(path: Path, mesh_file: str, mesh, sets, mat: dict, sw: float, direction: str, sign: int,
@@ -146,7 +207,7 @@ def write_job_inp(path: Path, mesh_file: str, mesh, sets, mat: dict, sw: float, 
     w(f"** ---------------- Step-1 : SWAGE {sw:+.3f} mm (radial, XZ plane) ----------------\n")
     w(f"*Step, name=Step-1_SWAGE, {nl}, inc={sc['max_inc']}\n" if dialect == "abaqus"
       else f"*Step, {nl}, INC={sc['max_inc']}\n")
-    w("*Static\n" + ", ".join(f"{v:g}" for v in s1) + "\n")
+    w("*Static\n" + fnums(s1) + "\n")
     w(_ccx_controls(dialect, sc))
     w("*Boundary\n")
     if dialect == "abaqus":
@@ -161,7 +222,7 @@ def write_job_inp(path: Path, mesh_file: str, mesh, sets, mat: dict, sw: float, 
         ux = sgn * sw * dx
         uz = sgn * sw * dz
         for nid, a, b in zip(mesh.node_ids[sets.outer], ux, uz):
-            w(f"{int(nid)}, 1, 1, {a:.8g}\n{int(nid)}, 2, 2, 0.\n{int(nid)}, 3, 3, {b:.8g}\n")
+            w(f"{int(nid)}, 1, 1, {fnum(a, DISP_DEC)}\n{int(nid)}, 2, 2, 0.\n{int(nid)}, 3, 3, {fnum(b, DISP_DEC)}\n")
     w(_outputs(dialect, sc["field_freq"]))
     w("*End Step\n")
 
@@ -172,9 +233,9 @@ def write_job_inp(path: Path, mesh_file: str, mesh, sets, mat: dict, sw: float, 
     w(f"** ---------------- {sname} : LOAD_RP U{dof} = {sign * amp:+g} mm ----------------\n")
     w(f"*Step, name={sname}, {nl}, inc={sc['max_inc']}\n" if dialect == "abaqus"
       else f"*Step, {nl}, INC={sc['max_inc']}\n")
-    w("*Static\n" + ", ".join(f"{v:g}" for v in s2) + "\n")
+    w("*Static\n" + fnums(s2) + "\n")
     w(_ccx_controls(dialect, sc))
-    w(f"*Boundary\nLOAD_RP, {dof}, {dof}, {sign * amp:.8g}\n")
+    w(f"*Boundary\nLOAD_RP, {dof}, {dof}, {fnum(sign * amp, DISP_DEC)}\n")
     w(_outputs(dialect, sc["field_freq"]))
     w("*End Step\n")
     fh.close()
@@ -228,7 +289,7 @@ def write_combined_inp(path: Path, mesh_file: str, mesh, sets, mat: dict, cases:
     def step(name, inc, bc, outputs):
         w(f"** ---------------- {name} ----------------\n")
         w(f"*Step, name={name}, NLGEOM=YES, inc={sc['max_inc']}\n")
-        w("*Static\n" + ", ".join(f"{v:g}" for v in inc) + "\n")
+        w("*Static\n" + fnums(inc) + "\n")
         w("*Boundary\n" + bc)
         w(outputs)
         w("*End Step\n")
@@ -240,7 +301,7 @@ def write_combined_inp(path: Path, mesh_file: str, mesh, sets, mat: dict, cases:
         bc = "LOAD_RP, 1, 6, 0.\n" if first else ""
         ux = sgn * sw * dx
         uz = sgn * sw * dz
-        bc += "".join(f"{int(n)}, 1, 1, {a:.8g}\n{int(n)}, 2, 2, 0.\n{int(n)}, 3, 3, {b:.8g}\n"
+        bc += "".join(f"{int(n)}, 1, 1, {fnum(a, DISP_DEC)}\n{int(n)}, 2, 2, 0.\n{int(n)}, 3, 3, {fnum(b, DISP_DEC)}\n"
                       for n, a, b in zip(outer_ids, ux, uz))
         sw_step = f"{tag}_SWAGE"
         step(sw_step, sc["swage_inc"], bc, out_full)
@@ -249,7 +310,7 @@ def write_combined_inp(path: Path, mesh_file: str, mesh, sets, mat: dict, cases:
         for c in [c for c in cases if c["sw"] == sw]:
             dof = DIR_DOF[c["dir"]]
             base = f"{tag}_{c['dir']}{'P' if c['sign'] > 0 else 'M'}"
-            step(f"{base}_LOAD", sc["load_inc"], f"LOAD_RP, {dof}, {dof}, {c['sign'] * c['amp']:.8g}\n", out_full)
+            step(f"{base}_LOAD", sc["load_inc"], f"LOAD_RP, {dof}, {dof}, {fnum(c['sign'] * c['amp'], DISP_DEC)}\n", out_full)
             plan.append({"job": c["job"], "sw": c["sw"], "dir": c["dir"], "sign": c["sign"], "amp": c["amp"],
                          "swage_step": sw_step, "load_step": f"{base}_LOAD", "prev_step": prev})
             step(f"{base}_BACK", back_inc, f"LOAD_RP, {dof}, {dof}, 0.\n", out_last)
