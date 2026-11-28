@@ -226,7 +226,8 @@ def run_grid_hex(g_cfg: dict, geom: Path, out_dir: Path, base: str, elem_size: f
           "CAD_VOLUME_MM3": res.get("cad_volume_mm3", ""), "VOLUME_ERR_PCT": res.get("volume_err_pct", ""),
           "EDGE_MEAN": res.get("edge_mean", ""), "PICTURE": _p(png) if png.exists() else "",
           "INP_FILE": _p(out_inp) if ok else "", "returncode": rc, "elapsed_s": round(dt, 1),
-          "MESSAGE": "" if ok else f"자동 헥사 실패 (rc={rc}): {res.get('error') or 'gridhex_console.log 확인'}"}
+          "MESSAGE": "" if ok else f"자동 헥사 실패 (rc={rc}): {res.get('error') or 'gridhex_console.log 확인'}",
+          "WARNING": res.get("warning", ""), "DROPPED_CELLS": res.get("cells_dropped_islands", "")}
     if ok:
         if out_inp.exists():
             out_inp.unlink()

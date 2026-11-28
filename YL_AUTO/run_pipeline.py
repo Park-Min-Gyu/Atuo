@@ -217,6 +217,19 @@ def _hex_signature(cfg, src: Path, es: float, hm: dict) -> str:
     return hashlib.sha1("||".join(parts).encode()).hexdigest()[:16]
 
 
+def gridhex_lost_cells(mesh_dir: Path) -> int:
+    """[v27.7] 저장된 자동 헥사 메시가 형상 조각을 뺀 채 만들어졌는지 (v27.6 이전 : 얇은 막 조각을 지우던 문제).
+    mesh/gridhex_console.log 의 마지막 결과에서 빠진 칸 수를 읽는다. 몇 칸짜리 잡음이면 0."""
+    f = Path(mesh_dir) / "gridhex_console.log"
+    try:
+        lines = [l for l in f.read_text(encoding="utf-8", errors="ignore").splitlines() if "GRIDHEX_RESULT " in l]
+        res = json.loads(lines[-1].split("GRIDHEX_RESULT ", 1)[1]) if lines else {}
+    except (OSError, ValueError):
+        return 0
+    n = int(res.get("cells_dropped_islands") or 0)
+    return n if n > max(8, 0.001 * int(res.get("n_hex") or 0)) else 0
+
+
 def mesh_ready(cfg, m, tag_dir: Path) -> bool:
     """[v27.5] 메시가 이미 있어서 바로 해석으로 갈 수 있는 모델인지 (처리 순서를 정하는 데만 씀)"""
     if Path(m["file"]).suffix.lower() == ".inp":
@@ -226,6 +239,8 @@ def mesh_ready(cfg, m, tag_dir: Path) -> bool:
         return False
     st = runners.read_kv(mesh_dir / "hm_status.txt")
     if st.get("STATUS") != "OK":
+        return False
+    if st.get("ALGO") == "GRID_HEX" and gridhex_lost_cells(mesh_dir):
         return False
     return mesh_engine(cfg) != "hex" or str(st.get("ALGO", "")).startswith(("YL_HEX", "GRID_HEX"))
 
@@ -253,6 +268,12 @@ def _stage_mesh(cfg, m, es, tag_dir, force):
         if st.get("STATUS") == "OK" and ok and eng_now == "hex" and not is_hex_mesh:
             ok = False
             log(f"[{m['name']}] 이전 메시는 헥사가 아님({st.get('ALGO', '?')}) -> 헥사로 다시 메시합니다")
+        if eng_now == "hex" and st.get("STATUS") == "OK" and ok and st.get("ALGO") == "GRID_HEX":
+            lostc = gridhex_lost_cells(mesh_dir)
+            if lostc:
+                ok = False
+                log(f"[{m['name']}] 이전 자동 헥사 메시는 얇은 부분 {lostc}칸이 빠진 채 만들어졌음 (v27.6 이전 문제) "
+                    f"-> 다시 메시합니다")
         if eng_now == "hex" and st.get("STATUS") == "OK" and ok:
             return st
         if st.get("STATUS") == "OK" and ok and want_v10 and not str(st.get("ALGO", "")).startswith(("YL_V10", "GMSH", "ROBUST")):
@@ -312,6 +333,8 @@ def _stage_mesh(cfg, m, es, tag_dir, force):
             log(f"[{m['name']}] 헥사 메시 성공 (자동 헥사) : Hex {gs.get('N_HEX')}개, 최소 scaled Jacobian {gs.get('SJ_MIN')}"
                 f" (평균 {gs.get('SJ_MEAN')}), CAD 대비 부피 오차 {gs.get('VOLUME_ERR_PCT')} %, {gs.get('elapsed_s')}s"
                 f" -> 메시 그림 mesh/{m['name']}_hexmesh.png")
+            if gs.get("WARNING"):
+                log(f"[{m['name']}] WARNING {gs['WARNING']}")
             log(f"[{m['name']}] HyperMesh 로 헥사 메시 보기: File > Import > Solver Deck (File type = Abaqus) 에서 "
                 f"mesh/{m['name']}_hm.inp 또는 run 폴더의 *_mesh.inp 를 읽음"
                 + (" (mesh/*_SolidMap_geometry_only.hm 은 SolidMap 시도 때 저장한 CAD 형상뿐, 메시 없음)"

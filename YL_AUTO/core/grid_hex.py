@@ -1067,8 +1067,14 @@ def _crit_local(qs, link, s_lo, s_hi, has_lo, has_hi):
     return False
 
 
+BRIDGE_MIN = 0.25     # [v27.7] 떨어져 나간 조각을 본체에 다시 붙일 때 쓰는 칸의 최소 안쪽 비율
+
+
 def clean_columns(sel, frac, X2, Q2, max_iter=60):
-    """기둥 칸 선택 정리 : 가장 큰 덩어리만, 비다양체 꼭짓점은 칸을 더해서"""
+    """기둥 칸 선택 정리 : 가장 큰 덩어리만, 비다양체 꼭짓점은 칸을 더해서.
+    [v27.7] 얇은 막(예: 코어 둘레 1 mm 고무층)을 가로지르는 칸이 절반 미만 안쪽이면 막이 끊겨 조각이 되고,
+            예전에는 그 조각을 '가장 큰 덩어리가 아님' 으로 통째로 지웠다 (LHS bushing : 코어 한쪽 고무층 104 칸이 사라짐).
+            지우기 전에, 조각과 본체에 동시에 닿아 있고 안쪽 비율이 BRIDGE_MIN 이상인 칸을 넣어 다시 잇는다."""
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
     m, nz = sel.shape
@@ -1084,15 +1090,36 @@ def clean_columns(sel, frac, X2, Q2, max_iter=60):
     E1 = np.stack([(pa[:, None] * nz + lay).ravel(), (pb[:, None] * nz + lay).ravel()], 1)
     E2 = np.stack([(np.arange(m)[:, None] * nz + lay[:-1]).ravel(), (np.arange(m)[:, None] * nz + lay[1:]).ravel()], 1)
     E = np.vstack([E1, E2])
-    for _ in range(6):
-        flat = sel.ravel()
+    fr = frac.ravel()
+
+    def components(flat):
         ok = flat[E[:, 0]] & flat[E[:, 1]]
         g = coo_matrix((np.ones(int(ok.sum())), (E[ok, 0], E[ok, 1])), shape=(m * nz, m * nz))
         _, lab = connected_components(g, directed=False)
         lab = np.where(flat, lab, -1)
+        keep = int(np.argmax(np.bincount(lab[flat]))) if flat.any() else -1
+        return lab, keep
+
+    bridged = 0
+    for _ in range(6):
+        flat = sel.ravel().copy()
         if flat.any():
-            cnt = np.bincount(lab[flat])
-            keep = int(np.argmax(cnt))
+            lab, keep = components(flat)
+            for _b in range(6):          # 조각 -> 본체 다리 놓기 (조각끼리 이어진 경우를 위해 몇 번 반복)
+                minor = flat & (lab != keep)
+                if not minor.any():
+                    break
+                main = lab == keep
+                a, b = E[:, 0], E[:, 1]
+                near_minor = np.concatenate([b[minor[a] & ~flat[b]], a[minor[b] & ~flat[a]]])
+                near_main = np.concatenate([b[main[a] & ~flat[b]], a[main[b] & ~flat[a]]])
+                bridge = np.intersect1d(near_minor, near_main)
+                bridge = bridge[fr[bridge] >= BRIDGE_MIN]
+                if not len(bridge):
+                    break
+                flat[bridge] = True
+                bridged += int(len(bridge))
+                lab, keep = components(flat)
             drop = flat & (lab != keep)
             dropped += int(drop.sum())
             flat = flat & ~drop
@@ -1135,7 +1162,7 @@ def clean_columns(sel, frac, X2, Q2, max_iter=60):
             changed = True
         if not changed:
             break
-    return sel, added, dropped
+    return sel, added + bridged, dropped
 
 
 def _quad_neighbors_2d(Q2):
@@ -2229,10 +2256,14 @@ def mesh(src, out_inp, h=2.0, opts=None, log=print, png=None) -> dict:
     attempts = attempts[:int(opts["max_attempts"])]
     cad_vol = S["volume"]
 
+    def lost(r):
+        """[v27.7] 메시에서 빠진 형상 조각(칸)이 있는지 : 몇 칸짜리 잡음은 무시"""
+        return r.get("dropped", 0) > max(8, 0.002 * r.get("n_cells", 0))
+
     def score(r):
         verr = abs(r["vol"] - cad_vol) / cad_vol if cad_vol else 0.0
-        good = r["sj_min"] > opts["sj_fail"] and verr <= 0.05
-        return (1 if good else 0, r["sj_min"] if good else -verr)
+        good = r["sj_min"] > opts["sj_fail"] and verr <= 0.05 and not lost(r)
+        return (1 if good else 0, r["sj_min"] if good else -verr - (0.01 if lost(r) else 0.0))
 
     best, tried = None, []
     for k, (kind, att) in enumerate(attempts):
@@ -2258,7 +2289,8 @@ def mesh(src, out_inp, h=2.0, opts=None, log=print, png=None) -> dict:
         verr = 100.0 * (r["vol"] - cad_vol) / cad_vol if cad_vol else float("nan")
         log(f"시도 {k + 1} ({'단면 쓸기' if kind == 'sweep' else '정육면체 격자'} {att}): 헥사 {len(r['conn'])}개 "
             f"(칸 {r['n_cells']} + 경계층 {r['n_pillow']}), 최소 SJ {r['sj_min']:.3f}, SJ<0.2 {nbad}개, "
-            f"부피 오차 {verr:.2f}% ({time.time() - ta:.1f}s)")
+            f"부피 오차 {verr:.2f}% ({time.time() - ta:.1f}s)"
+            + (f" - 형상 조각 {r['dropped']}칸이 빠짐 -> 다음 시도" if lost(r) else ""))
         tried.append({"kind": kind, **att, "sj_min": round(r["sj_min"], 4), "n_hex": len(r["conn"]),
                       "vol_err_pct": round(verr, 2)})
         if best is None or score(r) > score(best):
@@ -2287,6 +2319,10 @@ def mesh(src, out_inp, h=2.0, opts=None, log=print, png=None) -> dict:
            "bad_rays": best["bad_rays"], "attempt": tried, "elem_size": h, "n_cad_face_skip": S["n_skip"],
            "other_solids_mm3": S.get("other_solids", []),
            "elapsed_s": round(time.time() - t0, 1)}
+    if lost(best):
+        res["warning"] = (f"형상 일부가 메시에서 빠졌을 수 있음 (얇은 부분 칸 {best['dropped']}개를 본체에 잇지 못해 뺐음) "
+                          f"-> mesh 폴더의 *_hexmesh.png 와 CAD 를 비교해 볼 것")
+        log("주의: " + res["warning"])
     if not res["ok"]:
         why = []
         if best["sj_min"] <= opts["sj_fail"]:
